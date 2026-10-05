@@ -1,9 +1,10 @@
 {
   "domain": "oase_control",
   "name": "OASE Control",
-  "codeowners": [],
+  "codeowners": ["@noctarius"],
   "config_flow": true,
-  "documentation": "https://github.com/deltasystems-pl/pyoase",
+  "documentation": "https://github.com/noctarius/oase-home-assistant",
+  "issue_tracker": "https://github.com/noctarius/oase-home-assistant/issues",
   "iot_class": "cloud_polling",
   "requirements": ["pyoase==0.1.2"],
   "version": "0.1.0"
