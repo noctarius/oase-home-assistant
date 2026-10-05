@@ -1,0 +1,2 @@
+pytest-homeassistant-custom-component>=0.13.0
+pyoase==0.1.2

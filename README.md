@@ -13,6 +13,7 @@ transport.
 - FM-Master sockets 1–3 as switches
 - Dimmable outlet as a brightness light
 - Attached EGC devices' own on/off state, when the cloud reports it as controllable
+- Attached EGC pump power as a 0–100% number entity
 
 The integration deliberately uses OASE Cloud for transport. It does not make
 direct LAN connections yet: the controller's local protocol requires UDP
@@ -29,3 +30,8 @@ Control account.
 The config entry presently retains the email/password so `pyoase` can renew the
 OAuth session. Treat Home Assistant backups and `.storage/core.config_entries`
 as sensitive.
+
+## Development tests
+
+Create a virtual environment using the Python version supported by your Home
+Assistant release, install `requirements_test.txt`, then run `pytest`.
