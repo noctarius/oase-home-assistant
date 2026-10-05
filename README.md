@@ -20,6 +20,19 @@ direct LAN connections yet: the controller's local protocol requires UDP
 discovery and a reverse TLS connection, whereas the cloud relay is reliable and
 already uses identical O-Net payloads.
 
+## Install with HACS
+
+1. Open **HACS** in Home Assistant.
+2. Select **Integrations**, then the three-dot menu and **Custom repositories**.
+3. Add `https://github.com/noctarius/oase-home-assistant` with category
+   **Integration**.
+4. Search for **OASE Control**, install it, and restart Home Assistant.
+5. Add **OASE Control** from Settings → Devices & services.
+
+The repository follows HACS's standard integration layout:
+`custom_components/oase_control/`. It can be installed directly as a custom
+repository now; inclusion in HACS's default catalog is a separate review step.
+
 ## Install during development
 
 Copy `custom_components/oase_control` into Home Assistant's
