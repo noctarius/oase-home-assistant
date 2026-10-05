@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "data": {
+          "email": "OASE account email",
+          "password": "Password"
+        },
+        "description": "Sign in to your OASE Control cloud account."
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to OASE Cloud.",
+      "invalid_auth": "The OASE account email or password is incorrect.",
+      "unknown": "Unexpected error communicating with OASE Cloud."
+    },
+    "abort": {
+      "already_configured": "This OASE account is already configured.",
+      "reauth_successful": "OASE Control credentials were updated."
+    }
+  }
+}
