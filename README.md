@@ -20,6 +20,10 @@ direct LAN connections yet: the controller's local protocol requires UDP
 discovery and a reverse TLS connection, whereas the cloud relay is reliable and
 already uses identical O-Net payloads.
 
+Local-transport research is tracked in
+[docs/local-transport.md](docs/local-transport.md). It is deliberately
+read-only and not exposed as a Home Assistant setup option yet.
+
 ## Install with HACS
 
 1. Open **HACS** in Home Assistant.

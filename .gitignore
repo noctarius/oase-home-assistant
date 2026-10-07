@@ -1,0 +1,7 @@
+# Local working material, not integration assets.
+context/
+
+# Python and Home Assistant test artifacts.
+__pycache__/
+*.py[cod]
+.pytest_cache/

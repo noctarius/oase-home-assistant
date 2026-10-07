@@ -24,10 +24,14 @@ async def async_setup_entry(
     """Create entities for the inventory present at startup."""
     entities: list[SwitchEntity] = []
     for gateway in entry.runtime_data.data.gateways:
-        entities.extend(
-            OaseSocketSwitch(entry.runtime_data, gateway.id, socket, name)
-            for socket, name in _SOCKETS
-        )
+        # Socket 1-3 and the dimmer scene are specific to FM-Master gateways.
+        # Other gateway types (for example GatewayCloudEsp) can carry EGC
+        # devices, but do not expose these virtual mains outlets.
+        if gateway.is_fm_master:
+            entities.extend(
+                OaseSocketSwitch(entry.runtime_data, gateway.id, socket, name)
+                for socket, name in _SOCKETS
+            )
         entities.extend(
             OaseDeviceSwitch(entry.runtime_data, gateway.id, device)
             for device in gateway.devices
