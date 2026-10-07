@@ -10,9 +10,11 @@ from custom_components.oase_control.local import (
     LOCAL_TCP_PORT,
     LOCAL_UDP_PORT,
     OaseLocalAuthenticationError,
+    OaseLocalCredentialError,
     OaseLocalTlsSession,
     _create_server_tls_context,
     device_info_probe_packet,
+    local_credential_from_inventory,
     tcp_connection_request_packet,
 )
 
@@ -83,3 +85,34 @@ async def test_tls_session_rejects_a_wrong_password_check_packet_type():
 
     with pytest.raises(OaseLocalAuthenticationError, match="unexpected password check reply type"):
         await session.async_authenticate("credential")
+
+
+def test_local_credential_is_extracted_from_the_matching_gateway_only():
+    """Credential lookup does not accidentally select another gateway's value."""
+    inventory = {
+        "gateways": [
+            {"id": "other", "customAttributesJson": '[{"Id": 101, "Value": {"Value": "other"}}]'},
+            {
+                "id": "target",
+                "customAttributesJson": '[{"Id": 1, "Value": {"Value": null}}, '
+                '{"Id": 101, "Value": {"Value": "credential"}}]',
+            },
+        ]
+    }
+
+    assert local_credential_from_inventory(inventory, "target") == "credential"
+
+
+@pytest.mark.parametrize(
+    ("inventory", "gateway_id"),
+    [
+        ({}, "target"),
+        ({"gateways": []}, "target"),
+        ({"gateways": [{"id": "target", "customAttributesJson": "not-json"}]}, "target"),
+        ({"gateways": [{"id": "target", "customAttributesJson": "[]"}]}, "target"),
+    ],
+)
+def test_local_credential_rejects_absent_or_invalid_inventory_data(inventory, gateway_id):
+    """Absent credentials produce an actionable error without exposing data."""
+    with pytest.raises(OaseLocalCredentialError):
+        local_credential_from_inventory(inventory, gateway_id)

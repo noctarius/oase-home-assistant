@@ -18,6 +18,8 @@ yet.
 - Operational local commands require a successful `PASSWORD_CHECK` (`0x9F00`)
   after TLS. Its 64-byte credential payload is followed by a one-byte reply:
   `1` accepts the credentials and `2` rejects them.
+- The corresponding credential is provided by the cloud inventory in the
+  gateway's `customAttributesJson` attribute `101`. It is kept in memory only.
 
 ## First verification step
 
@@ -36,8 +38,8 @@ read-only O-Net request/reply validation.
 Before adding a local config option or any write path, we need to validate:
 
 1. the first local encrypted O-Net request/reply exchange from Home Assistant;
-2. the cloud-inventory field that supplies the controller credential;
-3. stable key/certificate storage suitable for Home Assistant;
+2. stable key/certificate storage suitable for Home Assistant;
+3. reads for each planned local entity;
 4. writes only after their matching read path works.
 
 Until those are verified, cloud remains the only production transport.
