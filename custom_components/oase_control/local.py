@@ -12,12 +12,13 @@ import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import ipaddress
+import json
 from pathlib import Path
 import ssl
 import struct
 import tempfile
 import time
-from typing import Final
+from typing import Any, Final, Mapping
 
 from pyoase import onet
 
@@ -25,6 +26,7 @@ LOCAL_UDP_PORT = 5959
 LOCAL_TCP_PORT = 5999
 _CERTIFICATE_COMMON_NAME: Final = "com.oase.easycontrol"
 _CERTIFICATE_VALIDITY: Final = timedelta(days=14)
+_LOCAL_CREDENTIAL_ATTRIBUTE_ID: Final = 101
 
 
 class OaseLocalTransportError(RuntimeError):
@@ -33,6 +35,10 @@ class OaseLocalTransportError(RuntimeError):
 
 class OaseLocalAuthenticationError(OaseLocalTransportError):
     """The controller rejected or malformed a local password check reply."""
+
+
+class OaseLocalCredentialError(OaseLocalTransportError):
+    """The cloud inventory did not contain a usable local credential."""
 
 
 @dataclass(frozen=True)
@@ -105,6 +111,47 @@ class OaseLocalTlsSession:
             pass
         self.server.close()
         await self.server.wait_closed()
+
+
+def local_credential_from_inventory(inventory: Mapping[str, Any], gateway_id: str) -> str:
+    """Return one gateway's local credential from a cloud inventory response.
+
+    The credential remains in memory only. Callers must neither log the return
+    value nor place it in a config entry or other persistent Home Assistant
+    storage.
+    """
+    gateways = inventory.get("gateways")
+    if not isinstance(gateways, list):
+        raise OaseLocalCredentialError("cloud inventory contains no gateways")
+
+    gateway = next(
+        (
+            candidate
+            for candidate in gateways
+            if isinstance(candidate, Mapping) and candidate.get("id") == gateway_id
+        ),
+        None,
+    )
+    if gateway is None:
+        raise OaseLocalCredentialError("gateway is not present in cloud inventory")
+
+    attributes = gateway.get("customAttributesJson")
+    try:
+        parsed_attributes = json.loads(attributes) if isinstance(attributes, str) else attributes
+    except json.JSONDecodeError as err:
+        raise OaseLocalCredentialError("gateway local credential data is invalid") from err
+    if not isinstance(parsed_attributes, list):
+        raise OaseLocalCredentialError("gateway local credential data is missing")
+
+    for attribute in parsed_attributes:
+        if not isinstance(attribute, Mapping) or attribute.get("Id") != _LOCAL_CREDENTIAL_ATTRIBUTE_ID:
+            continue
+        value = attribute.get("Value")
+        credential = value.get("Value") if isinstance(value, Mapping) else None
+        if isinstance(credential, str) and credential:
+            return credential
+        break
+    raise OaseLocalCredentialError("gateway local credential is unavailable")
 
 
 def device_info_probe_packet() -> bytes:
