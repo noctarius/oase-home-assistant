@@ -39,6 +39,11 @@ async def test_pump_power_number_converts_percent_to_onet_raw_value(hass):
     entity = OasePumpPowerNumber(coordinator, gateway.id, device)
 
     assert entity.native_value == 51
+    assert entity.device_info["name"] == "GardenPump"
+    assert entity.device_info["via_device"] == ("oase_control", gateway.id)
+    assert entity.device_info["identifiers"] == {
+        ("oase_control", gateway.id, str(device.device_number))
+    }
 
     await entity.async_set_native_value(50)
 

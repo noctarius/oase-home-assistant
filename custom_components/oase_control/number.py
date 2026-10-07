@@ -10,7 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from pyoase import Device, rdm
 
 from . import OaseConfigEntry
-from .entity import OaseEntity
+from .entity import OaseDeviceEntity
 
 
 async def async_setup_entry(
@@ -27,7 +27,7 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class OasePumpPowerNumber(OaseEntity, NumberEntity):
+class OasePumpPowerNumber(OaseDeviceEntity, NumberEntity):
     """Set an attached EGC pump's power level as a percentage."""
 
     _attr_name = "Power"
@@ -39,29 +39,19 @@ class OasePumpPowerNumber(OaseEntity, NumberEntity):
     _attr_mode = "slider"
 
     def __init__(self, coordinator, gateway_id: str, device: Device) -> None:
-        super().__init__(coordinator, gateway_id)
-        self.device_number = device.device_number
+        super().__init__(coordinator, gateway_id, device)
         self._attr_unique_id = f"{gateway_id}_device_{device.device_number}_power"
 
     @property
-    def _device(self) -> Device | None:
-        gateway = self.gateway
-        if not gateway:
-            return None
-        return next(
-            (item for item in gateway.devices if item.device_number == self.device_number), None
-        )
-
-    @property
     def native_value(self) -> int | None:
-        device = self._device
+        device = self.device
         if not device or not device.pump_state:
             return None
         return rdm.raw_to_percent(device.pump_state.dimmer_value)
 
     @property
     def available(self) -> bool:
-        device = self._device
+        device = self.device
         return (
             super().available
             and bool(self.gateway and self.gateway.is_online)

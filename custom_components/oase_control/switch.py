@@ -9,7 +9,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from pyoase import Device, onet
 
 from . import OaseConfigEntry
-from .entity import OaseEntity
+from .entity import OaseDeviceEntity, OaseEntity
 
 _SOCKETS = (
     (onet.Socket.SOCKET_1, "Socket 1"),
@@ -69,27 +69,17 @@ class OaseSocketSwitch(OaseEntity, SwitchEntity):
         await self.coordinator.async_request_refresh()
 
 
-class OaseDeviceSwitch(OaseEntity, SwitchEntity):
+class OaseDeviceSwitch(OaseDeviceEntity, SwitchEntity):
     """The EGC-level on/off state of an attached device, such as a pump."""
 
     def __init__(self, coordinator, gateway_id: str, device: Device) -> None:
-        super().__init__(coordinator, gateway_id)
-        self.device_number = device.device_number
+        super().__init__(coordinator, gateway_id, device)
         self._attr_name = device.product_name or f"{device.device_type} {device.device_number}"
         self._attr_unique_id = f"{gateway_id}_device_{device.device_number}_on"
 
     @property
-    def _device(self) -> Device | None:
-        gateway = self.gateway
-        if not gateway:
-            return None
-        return next(
-            (item for item in gateway.devices if item.device_number == self.device_number), None
-        )
-
-    @property
     def is_on(self) -> bool | None:
-        device = self._device
+        device = self.device
         return device.pump_state.device_on if device and device.pump_state else None
 
     async def async_turn_on(self, **kwargs) -> None:
