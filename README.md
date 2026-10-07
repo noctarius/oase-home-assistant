@@ -1,5 +1,7 @@
 # OASE Control for Home Assistant
 
+![OASE logo](OASE_Logo_Standard_rgb.svg)
+
 Cloud-first custom integration for OASE InScenio / FM-Master controllers. It is
 built on [`pyoase`](https://github.com/deltasystems-pl/pyoase), so outlet and
 EGC/RDM commands use the same O-Net frame codec that can later support a local
@@ -47,6 +49,11 @@ Control account.
 The config entry presently retains the email/password so `pyoase` can renew the
 OAuth session. Treat Home Assistant backups and `.storage/core.config_entries`
 as sensitive.
+
+## Logo attribution
+
+The OASE logo is sourced from
+[Wikimedia Commons / Wikipedia](https://de.wikipedia.org/wiki/Datei:OASE_Logo_Standard_rgb.svg).
 
 ## Development tests
 
