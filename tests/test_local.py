@@ -15,6 +15,7 @@ from custom_components.oase_control.local import (
     _create_server_tls_context,
     device_info_probe_packet,
     local_credential_from_inventory,
+    local_credentials_from_inventory,
     tcp_connection_request_packet,
 )
 
@@ -116,3 +117,15 @@ def test_local_credential_rejects_absent_or_invalid_inventory_data(inventory, ga
     """Absent credentials produce an actionable error without exposing data."""
     with pytest.raises(OaseLocalCredentialError):
         local_credential_from_inventory(inventory, gateway_id)
+
+
+def test_local_credentials_skips_gateways_without_usable_credentials():
+    """A missing value for one gateway must not discard another gateway's cache."""
+    inventory = {
+        "gateways": [
+            {"id": "missing", "customAttributesJson": "[]"},
+            {"id": "usable", "customAttributesJson": '[{"Id": 101, "Value": {"Value": "value"}}]'},
+        ]
+    }
+
+    assert local_credentials_from_inventory(inventory) == {"usable": "value"}

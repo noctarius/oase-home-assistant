@@ -43,7 +43,9 @@ class OaseControlConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "unknown"
             else:
                 assert self._reauth_entry is not None
-                self.hass.config_entries.async_update_entry(self._reauth_entry, data=user_input)
+                self.hass.config_entries.async_update_entry(
+                    self._reauth_entry, data={**self._reauth_entry.data, **user_input}
+                )
                 await self.async_set_unique_id(user_input[CONF_EMAIL].lower())
                 return self.async_abort(reason="reauth_successful")
 

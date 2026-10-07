@@ -154,6 +154,22 @@ def local_credential_from_inventory(inventory: Mapping[str, Any], gateway_id: st
     raise OaseLocalCredentialError("gateway local credential is unavailable")
 
 
+def local_credentials_from_inventory(inventory: Mapping[str, Any]) -> dict[str, str]:
+    """Return every usable gateway credential from a cloud inventory response."""
+    gateways = inventory.get("gateways")
+    if not isinstance(gateways, list):
+        return {}
+    credentials: dict[str, str] = {}
+    for gateway in gateways:
+        if not isinstance(gateway, Mapping) or not isinstance(gateway.get("id"), str):
+            continue
+        try:
+            credentials[gateway["id"]] = local_credential_from_inventory(inventory, gateway["id"])
+        except OaseLocalCredentialError:
+            continue
+    return credentials
+
+
 def device_info_probe_packet() -> bytes:
     """Build the read-only O-Net DEVICE_INFO local probe."""
     return onet.encode_packet(onet.PacketType.DEVICE_INFO)
