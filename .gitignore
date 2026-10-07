@@ -1,0 +1,7 @@
+# Local device research material, not integration assets.
+com.oase.easycontrol/
+
+# Python and Home Assistant test artifacts.
+__pycache__/
+*.py[cod]
+.pytest_cache/

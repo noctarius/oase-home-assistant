@@ -8,9 +8,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from pyoase import Inventory, OaseAuthError, OaseCloudClient, OaseError
+from pyoase import Inventory, OaseAuthError, OaseError
 
 from .const import DOMAIN, UPDATE_INTERVAL
+from .transport import OaseTransport
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -18,7 +19,7 @@ _LOGGER = logging.getLogger(__name__)
 class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
     """Poll the OASE inventory and expose it to all entities."""
 
-    def __init__(self, hass: HomeAssistant, client: OaseCloudClient) -> None:
+    def __init__(self, hass: HomeAssistant, client: OaseTransport) -> None:
         super().__init__(
             hass,
             logger=_LOGGER,

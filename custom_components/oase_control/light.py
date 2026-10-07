@@ -15,10 +15,11 @@ from .entity import OaseEntity
 async def async_setup_entry(
     hass: HomeAssistant, entry: OaseConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    """Add one dimmable-outlet light for every discovered gateway."""
+    """Add the dimmable outlet only for FM-Master gateways."""
     async_add_entities(
         OaseDimmerLight(entry.runtime_data, gateway.id)
         for gateway in entry.runtime_data.data.gateways
+        if gateway.is_fm_master
     )
 
 
