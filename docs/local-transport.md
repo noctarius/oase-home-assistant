@@ -1,34 +1,43 @@
 # Local transport research
 
 The cloud integration and a future local transport share the same `pyoase`
-O-Net frame codec. This branch adds a small, read-only probe in
-`custom_components/oase_control/local.py`; it is not exposed in the Home
-Assistant UI yet.
+O-Net frame codec. `custom_components/oase_control/local.py` contains the
+experimental local session setup; it is not exposed in the Home Assistant UI
+yet.
 
 ## Established facts
 
-- The controller's local endpoint uses UDP port **5959**.
-- O-Net `DEVICE_INFO` is packet type `0x1000`; its reply type is `0x10FF`.
-- The controller later opens a **reverse TLS** connection to a listener on TCP
-  port **5999**. The Home Assistant host must therefore be reachable from the
-  controller.
+- The controller discovers clients over UDP port **5959**. O-Net
+  `DEVICE_INFO` is packet type `0x1000`; its reply type is `0x10FF`.
+- A `TCP_REQ` (`0x1400`) has a seven-byte payload: encryption (`u8`), listener
+  port (`u16` little-endian), and Unix time (`u32` little-endian).
+- The controller opens a **reverse TLS 1.2** connection to the requested
+  listener port. The observed app uses TCP **5999**.
+- The controller accepts a self-signed RSA TLS-server certificate with
+  `CN=com.oase.easycontrol`; it does not present a client certificate.
+- Operational local commands require a successful `PASSWORD_CHECK` (`0x9F00`)
+  after TLS. Its 64-byte credential payload is followed by a one-byte reply:
+  `1` accepts the credentials and `2` rejects them.
 
 ## First verification step
 
 With a known controller IP address, call `async_probe_controller(host)`. It
-sends a **candidate** read-only `DEVICE_INFO` O-Net packet directly to that
-address and validates a matching reply. It intentionally does not broadcast
-onto the network. Successful hardware validation is required before treating
-this packet as the real discovery request.
+sends a read-only `DEVICE_INFO` O-Net packet directly to that address and
+validates a matching reply. It intentionally does not broadcast onto the
+network.
+
+`async_open_tls_session(host)` starts a temporary TLS server, sends the reverse
+connection request, and returns an `OaseLocalTlsSession` after the controller
+connects. The session's `async_request()` method is available for controlled,
+read-only O-Net request/reply validation.
 
 ## Unresolved before local control
 
-The reverse TLS handshake must be observed with real hardware before adding a
-local config option or write path. In particular, we need to capture:
+Before adding a local config option or any write path, we need to validate:
 
-1. the full UDP request that asks the controller to connect back;
-2. any controller password/MAC/host-address payload required by that request;
-3. the accepted TLS versions and ciphers in a Home Assistant-supported runtime;
-4. the first encrypted O-Net request/reply exchange.
+1. the first local encrypted O-Net request/reply exchange from Home Assistant;
+2. the cloud-inventory field that supplies the controller credential;
+3. stable key/certificate storage suitable for Home Assistant;
+4. writes only after their matching read path works.
 
 Until those are verified, cloud remains the only production transport.
