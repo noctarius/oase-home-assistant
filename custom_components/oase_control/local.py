@@ -21,7 +21,7 @@ import tempfile
 import time
 from typing import Any, Final, Mapping
 
-from pyoase import onet
+from pyoase import onet, rdm
 
 LOCAL_UDP_PORT = 5959
 LOCAL_TCP_PORT = 5999
@@ -50,6 +50,18 @@ class LocalDiscoveryResult:
 
     host: str
     info: onet.DiscoveryInfo
+
+
+@dataclass(frozen=True)
+class LocalEgcDeviceState:
+    """Read-only state returned for one device on the local EGC bus."""
+
+    article_number: int
+    device_number: int
+    manufacturer_id: int
+    subdevice_count: int
+    device_on_raw: bytes | None
+    pump_power_raw: bytes | None
 
 
 @dataclass
@@ -114,6 +126,67 @@ class OaseLocalTlsSession:
             pass
         self.server.close()
         await self.server.wait_closed()
+
+
+async def async_read_local_egc_devices(
+    host: str, password: str, *, timeout: float = 10.0
+) -> tuple[LocalEgcDeviceState, ...]:
+    """Authenticate and read the EGC bus locally without changing controller state."""
+    session = await async_open_tls_session(host, timeout=timeout)
+    try:
+        await session.async_authenticate(password, timeout=timeout)
+        return await async_read_egc_devices(session, timeout=timeout)
+    finally:
+        await session.async_close()
+
+
+async def async_read_egc_devices(
+    session: OaseLocalTlsSession, *, timeout: float = 5.0
+) -> tuple[LocalEgcDeviceState, ...]:
+    """Read the connected EGC device list and basic pump parameters from a session."""
+    discovery = await session.async_request(
+        rdm.EGC_DISCOVERY, rdm.discovery_packet_payload(), timeout=timeout
+    )
+    if discovery.packet_type != onet.reply_type(rdm.EGC_DISCOVERY):
+        raise OaseLocalTransportError("controller returned an unexpected EGC discovery reply")
+
+    devices: list[LocalEgcDeviceState] = []
+    for transaction_number, device in enumerate(rdm.parse_discovery_reply(discovery.payload), start=1):
+        devices.append(
+            LocalEgcDeviceState(
+                article_number=device.article_number,
+                device_number=device.device_number,
+                manufacturer_id=device.manufacturer_id,
+                subdevice_count=device.subdevice_count,
+                device_on_raw=await _async_rdm_get(
+                    session, device.device_number, rdm.Pid.DEVICE_ON, transaction_number, timeout
+                ),
+                pump_power_raw=await _async_rdm_get(
+                    session, device.device_number, rdm.Pid.PUMP_POWER, transaction_number, timeout
+                ),
+            )
+        )
+    return tuple(devices)
+
+
+async def _async_rdm_get(
+    session: OaseLocalTlsSession,
+    device_number: int,
+    pid: int,
+    transaction_number: int,
+    timeout: float,
+) -> bytes | None:
+    """Issue one acknowledged local RDM GET request."""
+    frame = rdm.build_frame(
+        rdm.Uid.for_device(device_number), rdm.CommandClass.GET_COMMAND, pid
+    )
+    reply = await session.async_request(
+        rdm.RDM_REQUEST, frame, transaction_number=transaction_number, timeout=timeout
+    )
+    if reply.packet_type != onet.reply_type(rdm.RDM_REQUEST):
+        return None
+    response = rdm.parse_frame(reply.payload)
+    return response.data if response.checksum_valid and response.is_ack else None
 
 
 def local_credential_from_inventory(inventory: Mapping[str, Any], gateway_id: str) -> str:

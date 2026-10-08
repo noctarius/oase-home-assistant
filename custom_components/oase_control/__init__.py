@@ -28,11 +28,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: OaseConfigEntry) -> bool
     session = async_get_clientsession(hass)
     auth = OaseAuth(session, entry.data[CONF_EMAIL], entry.data[CONF_PASSWORD])
     client = OaseCloudClient(session, auth)
-    coordinator = OaseDataUpdateCoordinator(hass, client)
+    cached_credentials = entry.data.get(CONF_LOCAL_CREDENTIALS, {})
+    coordinator = OaseDataUpdateCoordinator(
+        hass, client, dict(cached_credentials) if isinstance(cached_credentials, dict) else None
+    )
 
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
     await _async_cache_local_credentials(hass, entry, client)
+    refreshed_credentials = entry.data.get(CONF_LOCAL_CREDENTIALS, {})
+    if isinstance(refreshed_credentials, dict):
+        coordinator.local_credentials = dict(refreshed_credentials)
     _async_remove_invalid_fm_master_entities(hass, entry, coordinator)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
