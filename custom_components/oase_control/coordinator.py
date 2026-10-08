@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 from dataclasses import replace
 import logging
 from typing import Any, Mapping
@@ -10,10 +11,11 @@ from typing import Any, Mapping
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.event import async_track_time_interval
 
 from pyoase import Device, Gateway, Inventory, OaseAuthError, OaseError, PumpState, rdm
 
-from .const import DOMAIN, UPDATE_INTERVAL
+from .const import DOMAIN, LOCAL_UPDATE_INTERVAL, UPDATE_INTERVAL
 from .local import (
     LocalEgcDeviceState,
     OaseLocalTransportError,
@@ -40,9 +42,40 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         self.client = client
         self.local_credentials = local_credentials or {}
         self.local_sessions = OaseLocalSessionManager()
+        self._cancel_local_updates = None
+        self._local_read_lock = asyncio.Lock()
+        self._local_refresh_running = False
+
+    def async_start_local_updates(self) -> None:
+        """Start frequent local status reads independently of cloud inventory polls."""
+        if self._cancel_local_updates is not None:
+            return
+
+        async def _async_update(_now) -> None:
+            await self.async_refresh_local_state()
+
+        self._cancel_local_updates = async_track_time_interval(
+            self.hass, _async_update, LOCAL_UPDATE_INTERVAL, cancel_on_shutdown=True
+        )
+        self.hass.async_create_background_task(
+            self.async_refresh_local_state(), "oase_control_initial_local_read"
+        )
+
+    async def async_refresh_local_state(self) -> None:
+        """Refresh only local state, preserving the last known inventory topology."""
+        if self.data is None or self._local_refresh_running:
+            return
+        self._local_refresh_running = True
+        try:
+            self.async_set_updated_data(await self._async_apply_local_reads(self.data))
+        finally:
+            self._local_refresh_running = False
 
     async def async_close(self) -> None:
         """Release local reverse-TLS sessions when the config entry unloads."""
+        if self._cancel_local_updates is not None:
+            self._cancel_local_updates()
+            self._cancel_local_updates = None
         await self.local_sessions.async_close()
 
     async def _async_update_data(self) -> Inventory:
@@ -82,21 +115,25 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         """Prefer confirmed local EGC state without making a local failure fatal."""
         if not self.local_credentials:
             return inventory
-        gateways: list[Gateway] = []
-        for gateway in inventory.gateways:
-            credential = self.local_credentials.get(gateway.id)
-            if not credential or not gateway.serial_number:
-                gateways.append(gateway)
-                continue
-            try:
-                states = await self.local_sessions.async_read_egc_devices(
-                    gateway.id, gateway.serial_number, credential
-                )
-            except OaseLocalTransportError:
-                gateways.append(gateway)
-                continue
-            gateways.append(_gateway_with_local_state(gateway, states))
-        return replace(inventory, gateways=gateways)
+        # A periodic status refresh can overlap a cloud inventory refresh.  The
+        # controller speaks a request/reply protocol over one TLS stream, so
+        # serialise reads to prevent replies being consumed by the wrong caller.
+        async with self._local_read_lock:
+            gateways: list[Gateway] = []
+            for gateway in inventory.gateways:
+                credential = self.local_credentials.get(gateway.id)
+                if not credential or not gateway.serial_number:
+                    gateways.append(gateway)
+                    continue
+                try:
+                    states = await self.local_sessions.async_read_egc_devices(
+                        gateway.id, gateway.serial_number, credential
+                    )
+                except OaseLocalTransportError:
+                    gateways.append(gateway)
+                    continue
+                gateways.append(_gateway_with_local_state(gateway, states))
+            return replace(inventory, gateways=gateways)
 
 
 def _inventory_with_rdm_capabilities(

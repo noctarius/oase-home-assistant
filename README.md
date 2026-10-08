@@ -10,7 +10,7 @@ transport.
 ## Current scope
 
 - OASE Cloud account sign-in (Azure AD B2C via `pyoase`)
-- 30-second inventory polling
+- 30-second cloud inventory polling and 5-second local status polling
 - Gateway availability and type
 - FM-Master sockets 1–3 as switches
 - Dimmable outlet as a brightness light

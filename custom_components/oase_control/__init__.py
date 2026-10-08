@@ -39,6 +39,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OaseConfigEntry) -> bool
     refreshed_credentials = entry.data.get(CONF_LOCAL_CREDENTIALS, {})
     if isinstance(refreshed_credentials, dict):
         coordinator.local_credentials = dict(refreshed_credentials)
+    coordinator.async_start_local_updates()
     _async_remove_invalid_fm_master_entities(hass, entry, coordinator)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

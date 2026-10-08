@@ -1,5 +1,6 @@
 """Tests for OASE cloud inventory refreshes."""
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -35,6 +36,59 @@ async def test_coordinator_raises_reauth_on_invalid_credentials(hass):
 
     with pytest.raises(ConfigEntryAuthFailed):
         await coordinator._async_update_data()
+
+
+async def test_local_status_refresh_never_calls_the_cloud_client(hass):
+    """Frequent local polling remains independent from slow cloud inventory reads."""
+    inventory = Inventory(user=None, gateways=[])
+    client = AsyncMock()
+    coordinator = OaseDataUpdateCoordinator(hass, client)
+    coordinator.data = inventory
+
+    await coordinator.async_refresh_local_state()
+
+    client.async_get_inventory.assert_not_awaited()
+    assert coordinator.data is inventory
+
+
+async def test_local_reads_are_serialized_across_inventory_and_status_updates(hass):
+    """Two refresh paths cannot interleave packets on the controller TLS stream."""
+    gateway = Gateway(
+        id="gateway-id",
+        serial_number="606300063406",
+        article_number=55317,
+        gateway_type="GatewayCloudEsp",
+        is_online=True,
+        online_event_time=None,
+        sockets=None,
+    )
+    coordinator = OaseDataUpdateCoordinator(
+        hass, AsyncMock(), local_credentials={"gateway-id": "credential"}
+    )
+    first_read_started = asyncio.Event()
+    release_first_read = asyncio.Event()
+    active_reads = 0
+    max_active_reads = 0
+
+    async def _read(*_args):
+        nonlocal active_reads, max_active_reads
+        active_reads += 1
+        max_active_reads = max(max_active_reads, active_reads)
+        first_read_started.set()
+        await release_first_read.wait()
+        active_reads -= 1
+        return ()
+
+    coordinator.local_sessions.async_read_egc_devices = _read
+    inventory = Inventory(user=None, gateways=[gateway])
+    first = hass.async_create_task(coordinator._async_apply_local_reads(inventory))
+    await first_read_started.wait()
+    second = hass.async_create_task(coordinator._async_apply_local_reads(inventory))
+    await asyncio.sleep(0)
+    assert max_active_reads == 1
+
+    release_first_read.set()
+    await asyncio.gather(first, second)
 
 
 def test_cached_rdm_data_enables_only_confirmed_pump_controls():

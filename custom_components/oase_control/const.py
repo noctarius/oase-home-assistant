@@ -8,3 +8,4 @@ CONF_PASSWORD = "password"
 CONF_LOCAL_CREDENTIALS = "local_credentials"
 PLATFORMS = ["binary_sensor", "light", "number", "sensor", "switch"]
 UPDATE_INTERVAL = timedelta(seconds=30)
+LOCAL_UPDATE_INTERVAL = timedelta(seconds=5)
