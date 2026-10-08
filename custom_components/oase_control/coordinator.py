@@ -23,6 +23,7 @@ from .local import (
 from .transport import OaseTransport
 
 _LOGGER = logging.getLogger(__name__)
+_RDM_DEVICE_ON = 0xFF
 
 
 class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
@@ -159,7 +160,7 @@ def _device_with_rdm_capabilities(device: Device, raw_device: Any) -> Device:
             device,
             supported_pids=supported_pids,
             pump_state=PumpState(
-                device_on=bool(device_on and device_on[0]),
+                device_on=_rdm_device_is_on(device_on),
                 dimmer_value=power[0] if power else 0,
             ),
         )
@@ -196,8 +197,8 @@ def _device_with_local_state(device: Device, state: LocalEgcDeviceState | None) 
         is_connected=True,
         supported_pids=tuple(sorted(supported_pids)),
         pump_state=PumpState(
-            device_on=(state.device_on_raw[0] != 0)
-            if state.device_on_raw
+            device_on=_rdm_device_is_on(state.device_on_raw)
+            if state.device_on_raw is not None
             else previous.device_on,
             dimmer_value=state.pump_power_raw[0]
             if state.pump_power_raw
@@ -207,3 +208,8 @@ def _device_with_local_state(device: Device, state: LocalEgcDeviceState | None) 
             timestamp=previous.timestamp,
         ),
     )
+
+
+def _rdm_device_is_on(value: bytes | None) -> bool:
+    """Decode the EGC device-state value (0xFF=on, 0x02=off)."""
+    return bool(value) and value[0] == _RDM_DEVICE_ON
