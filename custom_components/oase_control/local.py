@@ -128,6 +128,60 @@ class OaseLocalTlsSession:
         await self.server.wait_closed()
 
 
+class OaseLocalSessionManager:
+    """Keep one authenticated reverse-TLS session open per local controller."""
+
+    def __init__(self) -> None:
+        self._sessions: dict[str, OaseLocalTlsSession] = {}
+
+    async def async_read_egc_devices(
+        self, gateway_id: str, serial_number: str, password: str
+    ) -> tuple[LocalEgcDeviceState, ...]:
+        """Read a gateway, reconnecting through discovery once if necessary."""
+        session = self._sessions.get(gateway_id)
+        if session is None:
+            session = await self._async_connect(gateway_id, serial_number, password)
+        try:
+            return await async_read_egc_devices(session)
+        except (ConnectionError, OSError, TimeoutError, ValueError, OaseLocalTransportError):
+            await self._async_drop(gateway_id)
+            session = await self._async_connect(gateway_id, serial_number, password)
+            try:
+                return await async_read_egc_devices(session)
+            except (ConnectionError, OSError, TimeoutError, ValueError, OaseLocalTransportError):
+                await self._async_drop(gateway_id)
+                raise
+
+    async def async_close(self) -> None:
+        """Close every reverse-TLS listener and session owned by this manager."""
+        await asyncio.gather(
+            *(session.async_close() for session in self._sessions.values()), return_exceptions=True
+        )
+        self._sessions.clear()
+
+    async def _async_connect(
+        self, gateway_id: str, serial_number: str, password: str
+    ) -> OaseLocalTlsSession:
+        controllers = await async_discover_controllers()
+        matches = [item for item in controllers if item.info.serial_number == serial_number]
+        if len(matches) != 1:
+            raise OaseLocalTransportError("controller was not uniquely found by local discovery")
+        session = await async_open_tls_session(matches[0].host)
+        try:
+            await session.async_authenticate(password)
+        except Exception:
+            await session.async_close()
+            raise
+        self._sessions[gateway_id] = session
+        return session
+
+    async def _async_drop(self, gateway_id: str) -> None:
+        """Forget and close one failed session."""
+        session = self._sessions.pop(gateway_id, None)
+        if session is not None:
+            await session.async_close()
+
+
 async def async_read_local_egc_devices(
     host: str, password: str, *, timeout: float = 10.0
 ) -> tuple[LocalEgcDeviceState, ...]:
