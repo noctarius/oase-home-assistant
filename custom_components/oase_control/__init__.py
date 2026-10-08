@@ -15,6 +15,7 @@ from pyoase import OaseAuth, OaseCloudClient, OaseError
 from .const import CONF_LOCAL_CREDENTIALS, DOMAIN, PLATFORMS
 from .coordinator import OaseDataUpdateCoordinator
 from .local import local_credentials_from_inventory
+from .services import async_setup_services
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ type OaseConfigEntry = ConfigEntry[OaseDataUpdateCoordinator]
 
 async def async_setup_entry(hass: HomeAssistant, entry: OaseConfigEntry) -> bool:
     """Set up OASE Control from a config entry."""
+    async_setup_services(hass)
     session = async_get_clientsession(hass)
     auth = OaseAuth(session, entry.data[CONF_EMAIL], entry.data[CONF_PASSWORD])
     client = OaseCloudClient(session, auth)

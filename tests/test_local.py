@@ -13,6 +13,7 @@ from custom_components.oase_control.local import (
     OaseLocalCredentialError,
     OaseLocalTlsSession,
     _create_server_tls_context,
+    _parse_discovery_result,
     device_info_probe_packet,
     local_credential_from_inventory,
     local_credentials_from_inventory,
@@ -29,6 +30,33 @@ def test_device_info_probe_uses_the_shared_onet_codec():
     assert packet.version == onet.PROTOCOL_VERSION
     assert LOCAL_UDP_PORT == 5959
     assert LOCAL_TCP_PORT == 5999
+
+
+def test_discovery_reply_parser_ignores_unrelated_datagrams():
+    """Broadcast discovery accepts only O-Net DEVICE_INFO replies."""
+    assert _parse_discovery_result(b"not-an-onet-packet", "10.0.0.2") is None
+    assert _parse_discovery_result(
+        onet.encode_packet(onet.PacketType.ALIVE), "10.0.0.2"
+    ) is None
+
+
+def test_discovery_reply_parser_returns_the_controller_identity():
+    """A valid broadcast reply retains the sender address and O-Net identity."""
+    payload = bytearray(324)
+    payload[2:7] = b"OASE\0"
+    payload[34:47] = b"606300063406\0"
+    payload[66:87] = b"EGC Controller Cloud\0"
+    payload[134:140] = bytes.fromhex("28562f8ac4ac")
+
+    result = _parse_discovery_result(
+        onet.encode_packet(onet.reply_type(onet.PacketType.DEVICE_INFO), bytes(payload)),
+        "10.96.1.89",
+    )
+
+    assert result is not None
+    assert result.host == "10.96.1.89"
+    assert result.info.serial_number == "606300063406"
+    assert result.info.mac_addresses == ("28:56:2f:8a:c4:ac",)
 
 
 def test_tcp_connection_request_matches_the_local_reverse_tls_contract():

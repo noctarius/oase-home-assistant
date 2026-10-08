@@ -1,0 +1,11 @@
+local_read:
+  name: Test local read
+  description: >-
+    Discovers a controller locally, then performs a read-only TLS and O-Net
+    scene query. The controller must be able to connect back to Home Assistant
+    on TCP port 5999.
+  fields:
+    gateway_id:
+      required: false
+      selector:
+        text:
