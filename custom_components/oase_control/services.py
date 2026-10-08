@@ -11,7 +11,12 @@ from homeassistant.helpers import config_validation as cv
 from pyoase import onet, rdm
 
 from .const import CONF_LOCAL_CREDENTIALS, DOMAIN
-from .local import OaseLocalTransportError, async_discover_controllers, async_open_tls_session
+from .local import (
+    OaseLocalTransportError,
+    async_discover_controllers,
+    async_open_tls_session,
+    async_read_egc_devices,
+)
 
 SERVICE_LOCAL_READ = "local_read"
 ATTR_GATEWAY_ID = "gateway_id"
@@ -43,7 +48,7 @@ def async_setup_services(hass: HomeAssistant) -> None:
             try:
                 await session.async_authenticate(credential)
                 reply = await session.async_request(onet.PacketType.GET_LIVE_SCENE)
-                egc_devices = await _async_read_egc_devices(session)
+                egc_devices = await async_read_egc_devices(session)
             finally:
                 await session.async_close()
         except OaseLocalTransportError as err:
@@ -62,7 +67,7 @@ def async_setup_services(hass: HomeAssistant) -> None:
                 "scene_type": scene.scene_type,
                 "data_hex": scene.data.hex(),
             },
-            "egc_devices": egc_devices,
+            "egc_devices": [_egc_device_response(device) for device in egc_devices],
         }
 
     hass.services.async_register(
@@ -105,42 +110,17 @@ def _cached_controller(hass: HomeAssistant, gateway_id: str | None) -> tuple[str
     raise HomeAssistantError("gateway_id is required when multiple local controllers are configured")
 
 
-async def _async_read_egc_devices(session) -> list[dict[str, int | str]]:
-    """Read the locally connected EGC devices and their basic pump values."""
-    discovery = await session.async_request(rdm.EGC_DISCOVERY, rdm.discovery_packet_payload())
-    if discovery.packet_type != onet.reply_type(rdm.EGC_DISCOVERY):
-        raise HomeAssistantError("controller returned an unexpected EGC discovery reply")
-
-    devices: list[dict[str, int | str]] = []
-    for transaction_number, device in enumerate(rdm.parse_discovery_reply(discovery.payload), start=1):
-        item: dict[str, int | str] = {
-            "article_number": device.article_number,
-            "device_number": device.device_number,
-            "manufacturer_id": device.manufacturer_id,
-            "subdevice_count": device.subdevice_count,
-        }
-        for pid, name in (
-            (rdm.Pid.DEVICE_ON, "device_on_raw"),
-            (rdm.Pid.PUMP_POWER, "pump_power_raw"),
-        ):
-            value = await _async_rdm_get(session, device.device_number, pid, transaction_number)
-            if value:
-                item[name] = value.hex()
-                if pid == rdm.Pid.PUMP_POWER:
-                    item["pump_power_percent"] = rdm.raw_to_percent(value[0])
-        devices.append(item)
-    return devices
-
-
-async def _async_rdm_get(session, device_number: int, pid: int, transaction_number: int) -> bytes:
-    """Issue one read-only RDM GET request, returning only acknowledged values."""
-    frame = rdm.build_frame(
-        rdm.Uid.for_device(device_number), rdm.CommandClass.GET_COMMAND, pid
-    )
-    reply = await session.async_request(rdm.RDM_REQUEST, frame, transaction_number=transaction_number)
-    if reply.packet_type != onet.reply_type(rdm.RDM_REQUEST):
-        return b""
-    response = rdm.parse_frame(reply.payload)
-    if not response.checksum_valid or not response.is_ack:
-        return b""
-    return response.data
+def _egc_device_response(device) -> dict[str, int | str]:
+    """Format one local EGC read for Home Assistant's service response."""
+    item: dict[str, int | str] = {
+        "article_number": device.article_number,
+        "device_number": device.device_number,
+        "manufacturer_id": device.manufacturer_id,
+        "subdevice_count": device.subdevice_count,
+    }
+    if device.device_on_raw:
+        item["device_on_raw"] = device.device_on_raw.hex()
+    if device.pump_power_raw:
+        item["pump_power_raw"] = device.pump_power_raw.hex()
+        item["pump_power_percent"] = rdm.raw_to_percent(device.pump_power_raw[0])
+    return item
