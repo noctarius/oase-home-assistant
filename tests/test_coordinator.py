@@ -108,7 +108,7 @@ def test_local_egc_read_makes_the_matching_gateway_and_pump_available():
                 device_number=12345,
                 manufacturer_id=20289,
                 subdevice_count=0,
-                device_on_raw=b"\x02",
+                device_on_raw=b"\xff",
                 pump_power_raw=b"\x01",
             ),
         ),
@@ -120,3 +120,37 @@ def test_local_egc_read_makes_the_matching_gateway_and_pump_available():
     assert updated.devices[0].can_set_power is True
     assert updated.devices[0].pump_state.device_on is True
     assert updated.devices[0].pump_state.dimmer_value == 1
+
+
+def test_local_egc_device_state_two_means_off():
+    """The AquaMax reports its inactive EGC state as enum value 2."""
+    device = Device(
+        id="pump-id",
+        device_number=12345,
+        article_number=75923,
+        device_type="GardenPump",
+        is_connected=True,
+        is_active=True,
+        pump_state=None,
+        has_rdm=True,
+        custom_attributes=None,
+    )
+    gateway = Gateway(
+        id="gateway-id",
+        serial_number="606300063406",
+        article_number=55317,
+        gateway_type="GatewayCloudEsp",
+        is_online=False,
+        online_event_time=None,
+        sockets=None,
+        devices=[device],
+    )
+
+    updated = _gateway_with_local_state(
+        gateway,
+        (
+            LocalEgcDeviceState(75923, 12345, 20289, 0, b"\x02", b"\x01"),
+        ),
+    )
+
+    assert updated.devices[0].pump_state.device_on is False
