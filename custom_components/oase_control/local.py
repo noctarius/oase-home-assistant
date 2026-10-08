@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 import ipaddress
 import json
 from pathlib import Path
+import socket
 import ssl
 import struct
 import tempfile
@@ -24,6 +25,8 @@ from pyoase import onet
 
 LOCAL_UDP_PORT = 5959
 LOCAL_TCP_PORT = 5999
+LOCAL_DISCOVERY_BROADCAST = "255.255.255.255"
+LOCAL_DISCOVERY_MULTICAST = "224.0.0.251"
 _CERTIFICATE_COMMON_NAME: Final = "com.oase.easycontrol"
 _CERTIFICATE_VALIDITY: Final = timedelta(days=14)
 _LOCAL_CREDENTIAL_ATTRIBUTE_ID: Final = 101
@@ -175,6 +178,42 @@ def device_info_probe_packet() -> bytes:
     return onet.encode_packet(onet.PacketType.DEVICE_INFO)
 
 
+async def async_discover_controllers(*, timeout: float = 3.0) -> list[LocalDiscoveryResult]:
+    """Discover local controllers using O-Net UDP broadcast and multicast.
+
+    This is O-Net discovery, not DNS-SD: DEVICE_INFO is sent to UDP/5959 on
+    both the IPv4 limited broadcast address and OASE's multicast group. Replies
+    are deduplicated by controller serial number.
+    """
+    loop = asyncio.get_running_loop()
+    replies: asyncio.Queue[tuple[bytes, tuple[str, int]]] = asyncio.Queue()
+    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    udp_socket.bind(("0.0.0.0", LOCAL_UDP_PORT))
+    transport, _protocol = await loop.create_datagram_endpoint(
+        lambda: _DiscoveryProtocol(replies), sock=udp_socket
+    )
+    try:
+        packet = device_info_probe_packet()
+        transport.sendto(packet, (LOCAL_DISCOVERY_BROADCAST, LOCAL_UDP_PORT))
+        transport.sendto(packet, (LOCAL_DISCOVERY_MULTICAST, LOCAL_UDP_PORT))
+
+        results: dict[str, LocalDiscoveryResult] = {}
+        deadline = loop.time() + timeout
+        while (remaining := deadline - loop.time()) > 0:
+            try:
+                data, address = await asyncio.wait_for(replies.get(), remaining)
+            except TimeoutError:
+                break
+            result = _parse_discovery_result(data, address[0])
+            if result is not None:
+                results.setdefault(result.info.serial_number or result.host, result)
+        return sorted(results.values(), key=lambda result: (result.info.serial_number, result.host))
+    finally:
+        transport.close()
+
+
 def tcp_connection_request_packet(
     listener_port: int = LOCAL_TCP_PORT,
     *,
@@ -217,14 +256,21 @@ async def async_probe_controller(host: str, *, timeout: float = 5.0) -> LocalDis
     finally:
         transport.close()
 
+    result = _parse_discovery_result(data, host)
+    if result is None:
+        raise OaseLocalTransportError(f"invalid O-Net discovery reply from {host}")
+    return result
+
+
+def _parse_discovery_result(data: bytes, host: str) -> LocalDiscoveryResult | None:
+    """Decode one matching UDP DEVICE_INFO response, ignoring unrelated frames."""
     try:
         packet = onet.parse_packet(data)
-        expected_type = onet.reply_type(onet.PacketType.DEVICE_INFO)
-        if packet.packet_type != expected_type:
-            raise ValueError(f"unexpected packet type 0x{packet.packet_type:04x}")
+        if packet.packet_type != onet.reply_type(onet.PacketType.DEVICE_INFO):
+            return None
         return LocalDiscoveryResult(host=host, info=onet.parse_discovery_reply(packet.payload))
-    except ValueError as err:
-        raise OaseLocalTransportError(f"invalid O-Net discovery reply from {host}") from err
+    except ValueError:
+        return None
 
 
 async def async_open_tls_session(
@@ -394,3 +440,13 @@ class _ProbeProtocol(asyncio.DatagramProtocol):
     def error_received(self, exc: Exception) -> None:
         if not self._reply.done():
             self._reply.set_exception(exc)
+
+
+class _DiscoveryProtocol(asyncio.DatagramProtocol):
+    """Collect UDP datagrams received during one O-Net discovery window."""
+
+    def __init__(self, replies: asyncio.Queue[tuple[bytes, tuple[str, int]]]) -> None:
+        self._replies = replies
+
+    def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
+        self._replies.put_nowait((data, addr))
