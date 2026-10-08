@@ -90,4 +90,7 @@ async def _async_update_listener(hass: HomeAssistant, entry: OaseConfigEntry) ->
 
 async def async_unload_entry(hass: HomeAssistant, entry: OaseConfigEntry) -> bool:
     """Unload an OASE Control config entry."""
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unloaded:
+        await entry.runtime_data.async_close()
+    return unloaded

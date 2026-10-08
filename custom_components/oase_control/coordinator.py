@@ -17,8 +17,7 @@ from .const import DOMAIN, UPDATE_INTERVAL
 from .local import (
     LocalEgcDeviceState,
     OaseLocalTransportError,
-    async_discover_controllers,
-    async_read_local_egc_devices,
+    OaseLocalSessionManager,
 )
 from .transport import OaseTransport
 
@@ -40,6 +39,11 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         )
         self.client = client
         self.local_credentials = local_credentials or {}
+        self.local_sessions = OaseLocalSessionManager()
+
+    async def async_close(self) -> None:
+        """Release local reverse-TLS sessions when the config entry unloads."""
+        await self.local_sessions.async_close()
 
     async def _async_update_data(self) -> Inventory:
         try:
@@ -78,20 +82,16 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         """Prefer confirmed local EGC state without making a local failure fatal."""
         if not self.local_credentials:
             return inventory
-        try:
-            discovered = await async_discover_controllers()
-        except (OSError, OaseLocalTransportError):
-            return inventory
-        hosts = {result.info.serial_number: result.host for result in discovered}
         gateways: list[Gateway] = []
         for gateway in inventory.gateways:
             credential = self.local_credentials.get(gateway.id)
-            host = hosts.get(gateway.serial_number)
-            if not credential or not host:
+            if not credential or not gateway.serial_number:
                 gateways.append(gateway)
                 continue
             try:
-                states = await async_read_local_egc_devices(host, credential)
+                states = await self.local_sessions.async_read_egc_devices(
+                    gateway.id, gateway.serial_number, credential
+                )
             except OaseLocalTransportError:
                 gateways.append(gateway)
                 continue
