@@ -545,7 +545,7 @@ def local_credential_from_inventory(inventory: Mapping[str, Any], gateway_id: st
     """Return one gateway's local credential from a cloud inventory response.
 
     Callers must never log the return value. The integration persists it in
-    its config entry only so that local control survives cloud outages.
+    its config entry so that, once set up, local control survives cloud outages.
     """
     gateways = inventory.get("gateways")
     if not isinstance(gateways, list):

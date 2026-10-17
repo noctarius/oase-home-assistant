@@ -161,6 +161,10 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         except OaseAuthError as err:
             local = await self._async_local_fallback()
             if local is not None:
+                # Keep local control running, but still ask for new
+                # credentials: cloud-only state is frozen until then.
+                if self.config_entry is not None:
+                    self.config_entry.async_start_reauth(self.hass)
                 return local
             raise ConfigEntryAuthFailed("OASE authentication failed") from err
         except OaseError as err:
@@ -176,9 +180,9 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
     ) -> None:
         """Follow the cloud's local credentials, keeping a copy for cloud outages.
 
-        Credentials are persisted in the config entry so that local control
-        keeps working when the cloud is unreachable at startup. They are
-        limited to gateways still in the inventory and never logged.
+        Credentials are persisted in the config entry, limited to gateways still
+        in the inventory, and never logged. Setup still needs one successful
+        cloud inventory read; afterwards local control survives cloud outages.
         """
         gateway_ids = {gateway.id for gateway in inventory.gateways}
         merged = {**self.local_credentials, **local_credentials_from_inventory(raw_inventory)}
@@ -201,10 +205,26 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         return raw_inventory if isinstance(raw_inventory, dict) else None
 
     async def _async_local_fallback(self) -> Inventory | None:
-        """Keep an already loaded inventory working when only cloud is unavailable."""
+        """Keep locally reachable gateways working while the cloud is unavailable.
+
+        Returns ``None`` when no gateway answered locally, so the outage is
+        reported instead of the last inventory being presented as current.
+        Gateways that did not answer are marked offline for the same reason.
+        """
         if self.data is None:
             return None
-        return await self._async_apply_local_reads(self.data)
+        states = await self._async_read_local_states(self.data)
+        if not states:
+            return None
+        return replace(
+            self.data,
+            gateways=[
+                _gateway_with_local_state(gateway, states[gateway.id])
+                if gateway.id in states
+                else replace(gateway, is_online=False)
+                for gateway in self.data.gateways
+            ],
+        )
 
     async def _async_apply_local_reads(self, inventory: Inventory) -> Inventory:
         """Prefer confirmed local EGC state without making a local failure fatal."""

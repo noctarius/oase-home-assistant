@@ -2,23 +2,25 @@
 
 import asyncio
 from datetime import timedelta
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from homeassistant.core import callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
-from pyoase import Device, Gateway, Inventory, OaseAuthError, rdm
+from pyoase import Device, Gateway, Inventory, OaseAuthError, OaseConnectionError, rdm
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.oase_control.coordinator import (
     OaseDataUpdateCoordinator,
     _inventory_with_rdm_capabilities,
     _gateway_with_local_state,
 )
-from custom_components.oase_control.local import LocalEgcDeviceState
+from custom_components.oase_control.local import LocalEgcDeviceState, OaseLocalTransportError
 
 
 def _local_gateway(gateway_id: str = "gateway-id", *, is_online: bool = False) -> Gateway:
@@ -323,3 +325,57 @@ async def test_local_write_refresh_runs_after_an_in_flight_read(hass):
     await poll
 
     assert reads == 2
+
+
+def _cloud_down_coordinator(hass, error, **kwargs) -> OaseDataUpdateCoordinator:
+    client = AsyncMock()
+    client.async_get_inventory_raw.side_effect = error
+    coordinator = OaseDataUpdateCoordinator(
+        hass, client, local_credentials={"gateway-id": "credential", "other": "credential"}, **kwargs
+    )
+    coordinator.data = Inventory(
+        user=None,
+        gateways=[_local_gateway(is_online=True), _local_gateway("other", is_online=True)],
+    )
+    return coordinator
+
+
+async def test_cloud_and_local_outage_is_reported(hass):
+    """The last inventory is not presented as current when nothing answers."""
+    coordinator = _cloud_down_coordinator(hass, OaseConnectionError("offline"))
+    coordinator.local_sessions.async_read_egc_devices = AsyncMock(
+        side_effect=OaseLocalTransportError("unreachable")
+    )
+
+    with pytest.raises(UpdateFailed):
+        await coordinator._async_update_data()
+
+
+async def test_cloud_outage_marks_locally_unreachable_gateways_offline(hass):
+    """Only gateways that answered locally keep reporting live state."""
+    coordinator = _cloud_down_coordinator(hass, OaseConnectionError("offline"))
+
+    async def _read(gateway_id, *_args):
+        if gateway_id == "other":
+            raise OaseLocalTransportError("unreachable")
+        return ()
+
+    coordinator.local_sessions.async_read_egc_devices = _read
+
+    inventory = await coordinator._async_update_data()
+
+    assert [gateway.is_online for gateway in inventory.gateways] == [True, False]
+
+
+async def test_expired_cloud_credentials_still_start_reauth_during_local_fallback(hass):
+    """Local control does not hide that the cloud account needs attention."""
+    entry = MockConfigEntry(domain="oase_control", data={})
+    entry.add_to_hass(hass)
+    coordinator = _cloud_down_coordinator(hass, OaseAuthError("expired"), config_entry=entry)
+    coordinator.local_sessions.async_read_egc_devices = AsyncMock(return_value=())
+
+    with patch.object(entry, "async_start_reauth") as start_reauth:
+        inventory = await coordinator._async_update_data()
+
+    assert inventory.gateways[0].is_online is True
+    start_reauth.assert_called_once_with(hass)
