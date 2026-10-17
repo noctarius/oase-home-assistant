@@ -1,12 +1,15 @@
 """Tests for the local O-Net transport primitives."""
 
 import asyncio
-from unittest.mock import AsyncMock
+import socket
+import ssl
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from pyoase import onet, rdm
 
+from custom_components.oase_control import local
 from custom_components.oase_control.local import (
     LOCAL_TCP_PORT,
     LOCAL_UDP_PORT,
@@ -16,7 +19,9 @@ from custom_components.oase_control.local import (
     OaseLocalTlsSession,
     OaseLocalTransportError,
     _create_server_tls_context,
+    _local_network,
     _parse_discovery_result,
+    async_open_tls_session,
     async_set_egc_parameter,
     device_info_probe_packet,
     local_credential_from_inventory,
@@ -210,3 +215,92 @@ def test_local_credentials_skips_gateways_without_usable_credentials():
     }
 
     assert local_credentials_from_inventory(inventory) == {"usable": "value"}
+
+
+def _free_tcp_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _client_tls_context() -> ssl.SSLContext:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
+
+
+async def _wait_for_routed_connection(port: int) -> None:
+    listener = _local_network().listeners[port]
+    for _ in range(200):
+        waiter = listener._waiters.get("127.0.0.1")
+        if waiter is not None and waiter.done():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("controller connection was not routed")
+
+
+async def test_reverse_tls_sessions_share_one_listener(socket_enabled):
+    """Every controller connects back to one port, so the listener is shared."""
+    port = _free_tcp_port()
+    listener = local._ReverseTlsListener(port)
+
+    await listener.async_acquire()
+    server = listener._server
+    await listener.async_acquire()
+    assert listener._server is server
+
+    listener.release()
+    assert listener._server is server
+    listener.release()
+    assert listener._server is None
+    await asyncio.wait_for(server.wait_closed(), 1)
+
+
+async def test_failed_tls_open_drops_an_unclaimed_controller_connection(socket_enabled):
+    """A connection that arrives for a failed attempt must not hang the listener."""
+    port = _free_tcp_port()
+    clients = []
+
+    async def _connect_then_fail(_controller_ip, listener_port, _timeout):
+        clients.append(
+            await asyncio.open_connection("127.0.0.1", listener_port, ssl=_client_tls_context())
+        )
+        await _wait_for_routed_connection(listener_port)
+        raise ValueError("controller rejected TCP connection request")
+
+    with patch.object(local, "_async_request_reverse_connection", _connect_then_fail):
+        listener_task = asyncio.ensure_future(
+            async_open_tls_session("127.0.0.1", listener_port=port, timeout=2)
+        )
+        with pytest.raises(OaseLocalTransportError):
+            await asyncio.wait_for(listener_task, 5)
+
+    listener = _local_network().listeners[port]
+    assert listener._server is None
+    assert listener._waiters == {}
+    reader, writer = clients[0]
+    assert await asyncio.wait_for(reader.read(), 2) == b""
+    writer.close()
+
+
+async def test_opened_tls_session_releases_the_listener_when_closed(socket_enabled):
+    """A successful session keeps the listener only for as long as it is open."""
+    port = _free_tcp_port()
+    clients = []
+
+    async def _connect(_controller_ip, listener_port, _timeout):
+        clients.append(
+            await asyncio.open_connection("127.0.0.1", listener_port, ssl=_client_tls_context())
+        )
+
+    with patch.object(local, "_async_request_reverse_connection", _connect):
+        session = await asyncio.wait_for(
+            async_open_tls_session("127.0.0.1", listener_port=port, timeout=2), 5
+        )
+
+    listener = _local_network().listeners[port]
+    assert listener._server is not None
+    clients[0][1].close()
+    await session.async_close()
+    assert listener._server is None

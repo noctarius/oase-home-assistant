@@ -7,7 +7,7 @@ controller opens a TLS connection back to a listener on port 5999.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 import ipaddress
 import json
@@ -18,6 +18,7 @@ import struct
 import tempfile
 import time
 from typing import Any, Final, Mapping
+import weakref
 
 from pyoase import onet, rdm
 
@@ -27,6 +28,8 @@ LOCAL_DISCOVERY_BROADCAST = "255.255.255.255"
 LOCAL_DISCOVERY_MULTICAST = "224.0.0.251"
 _CERTIFICATE_COMMON_NAME: Final = "com.oase.easycontrol"
 _CERTIFICATE_VALIDITY: Final = timedelta(days=14)
+# Regenerate well before expiry; a listener may outlive one certificate.
+_CERTIFICATE_ROTATION: Final = timedelta(days=7)
 _LOCAL_CREDENTIAL_ATTRIBUTE_ID: Final = 101
 
 
@@ -66,13 +69,14 @@ class LocalEgcDeviceState:
 class OaseLocalTlsSession:
     """An established controller-to-client TLS connection.
 
-    The session owns the listener that accepted it. Close it when the local
-    operation is complete to release TCP/5999 again.
+    The session holds a lease on the shared reverse-TLS listener. Close it when
+    the local operation is complete so the listener can release TCP/5999.
     """
 
     reader: asyncio.StreamReader
     writer: asyncio.StreamWriter
-    server: asyncio.AbstractServer
+    listener: _ReverseTlsListener
+    _closed: bool = field(default=False, init=False, repr=False)
 
     async def async_request(
         self,
@@ -116,14 +120,126 @@ class OaseLocalTlsSession:
         raise OaseLocalAuthenticationError("unknown password check reply state")
 
     async def async_close(self) -> None:
-        """Close the TLS connection and its temporary listener."""
-        self.writer.close()
+        """Close the TLS connection and release the shared listener."""
+        if self._closed:
+            return
+        self._closed = True
         try:
-            await self.writer.wait_closed()
-        except (ConnectionError, OSError):
-            pass
-        self.server.close()
-        await self.server.wait_closed()
+            self.writer.close()
+            try:
+                await self.writer.wait_closed()
+            except (ConnectionError, OSError):
+                pass
+        finally:
+            self.listener.release()
+
+
+class _ReverseTlsListener:
+    """One TCP listener shared by every reverse-TLS session on a port.
+
+    Controllers always connect back to the same port, so per-session listeners
+    cannot coexist. Accepted connections are routed to the waiter registered
+    for the controller's address; anything else is dropped. The listener is
+    open only while at least one session or connection attempt holds a lease.
+    """
+
+    def __init__(self, port: int) -> None:
+        self.port = port
+        self._server: asyncio.Server | None = None
+        self._context: ssl.SSLContext | None = None
+        self._context_created = 0.0
+        self._users = 0
+        self._lock = asyncio.Lock()
+        self._waiters: dict[
+            str, asyncio.Future[tuple[asyncio.StreamReader, asyncio.StreamWriter]]
+        ] = {}
+
+    async def async_acquire(self) -> None:
+        """Take a lease, starting the listener if it is not running."""
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            if (
+                self._context is None
+                or loop.time() - self._context_created > _CERTIFICATE_ROTATION.total_seconds()
+            ):
+                # RSA key generation and loading the PEM files block.
+                self._context = await loop.run_in_executor(None, _create_server_tls_context)
+                self._context_created = loop.time()
+                if self._server is not None:
+                    # Stop accepting with the old certificate. Established
+                    # sessions keep their connections.
+                    self._server.close()
+                    self._server = None
+            if self._server is None:
+                self._server = await asyncio.start_server(
+                    self._async_on_connection, host="0.0.0.0", port=self.port, ssl=self._context
+                )
+            self._users += 1
+
+    def release(self) -> None:
+        """Return a lease, closing the listener once nobody needs it."""
+        self._users -= 1
+        if self._users == 0 and self._server is not None:
+            server, self._server = self._server, None
+            server.close()
+            server.abort_clients()
+
+    def expect(
+        self, host: str
+    ) -> asyncio.Future[tuple[asyncio.StreamReader, asyncio.StreamWriter]]:
+        """Register interest in the next connection from one controller."""
+        if host in self._waiters:
+            raise OaseLocalTransportError("a connection from this controller is already pending")
+        waiter = asyncio.get_running_loop().create_future()
+        self._waiters[host] = waiter
+        return waiter
+
+    def forget(self, host: str, waiter: asyncio.Future[Any]) -> None:
+        """Stop routing connections from a controller to an expired waiter."""
+        if self._waiters.get(host) is waiter:
+            del self._waiters[host]
+
+    async def _async_on_connection(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        peer = writer.get_extra_info("peername")
+        waiter = self._waiters.get(peer[0]) if peer else None
+        if waiter is None or waiter.done():
+            writer.transport.abort()
+            return
+        waiter.set_result((reader, writer))
+
+
+@dataclass
+class _LocalNetwork:
+    """Local sockets shared by every config entry running on one event loop."""
+
+    udp_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    listeners: dict[int, _ReverseTlsListener] = field(default_factory=dict)
+
+
+_NETWORKS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _LocalNetwork] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _local_network() -> _LocalNetwork:
+    """Return the running loop's shared local network state."""
+    loop = asyncio.get_running_loop()
+    network = _NETWORKS.get(loop)
+    if network is None:
+        network = _NETWORKS[loop] = _LocalNetwork()
+    return network
+
+
+async def _async_close_datagram(transport: asyncio.BaseTransport) -> None:
+    """Close a UDP transport and let its socket be released before returning.
+
+    The socket is closed on the next loop iteration; yielding once ensures the
+    next user of UDP/5959 can bind it.
+    """
+    transport.close()
+    await asyncio.sleep(0)
 
 
 class OaseLocalSessionManager:
@@ -390,6 +506,11 @@ async def async_discover_controllers(*, timeout: float = 3.0) -> list[LocalDisco
     both the IPv4 limited broadcast address and OASE's multicast group. Replies
     are deduplicated by controller serial number.
     """
+    async with _local_network().udp_lock:
+        return await _async_discover_controllers(timeout)
+
+
+async def _async_discover_controllers(timeout: float) -> list[LocalDiscoveryResult]:
     loop = asyncio.get_running_loop()
     replies: asyncio.Queue[tuple[bytes, tuple[str, int]]] = asyncio.Queue()
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -416,7 +537,7 @@ async def async_discover_controllers(*, timeout: float = 3.0) -> list[LocalDisco
                 results.setdefault(result.info.serial_number or result.host, result)
         return sorted(results.values(), key=lambda result: (result.info.serial_number, result.host))
     finally:
-        transport.close()
+        await _async_close_datagram(transport)
 
 
 def tcp_connection_request_packet(
@@ -445,21 +566,22 @@ async def async_probe_controller(host: str, *, timeout: float = 5.0) -> LocalDis
     """
     loop = asyncio.get_running_loop()
     reply: asyncio.Future[bytes] = loop.create_future()
-    transport, _protocol = await loop.create_datagram_endpoint(
-        lambda: _ProbeProtocol(
-            reply,
-            device_info_probe_packet(),
-            expected_packet_type=onet.reply_type(onet.PacketType.DEVICE_INFO),
-        ),
-        local_addr=("0.0.0.0", LOCAL_UDP_PORT),
-        remote_addr=(host, LOCAL_UDP_PORT),
-    )
-    try:
-        data = await asyncio.wait_for(reply, timeout)
-    except TimeoutError as err:
-        raise OaseLocalTransportError(f"no UDP reply from {host}:{LOCAL_UDP_PORT}") from err
-    finally:
-        transport.close()
+    async with _local_network().udp_lock:
+        transport, _protocol = await loop.create_datagram_endpoint(
+            lambda: _ProbeProtocol(
+                reply,
+                device_info_probe_packet(),
+                expected_packet_type=onet.reply_type(onet.PacketType.DEVICE_INFO),
+            ),
+            local_addr=("0.0.0.0", LOCAL_UDP_PORT),
+            remote_addr=(host, LOCAL_UDP_PORT),
+        )
+        try:
+            data = await asyncio.wait_for(reply, timeout)
+        except TimeoutError as err:
+            raise OaseLocalTransportError(f"no UDP reply from {host}:{LOCAL_UDP_PORT}") from err
+        finally:
+            await _async_close_datagram(transport)
 
     result = _parse_discovery_result(data, host)
     if result is None:
@@ -491,40 +613,53 @@ async def async_open_tls_session(
     :meth:`OaseLocalTlsSession.async_request` for controlled read-only testing.
     """
     controller_ip = str(ipaddress.ip_address(host))
-    loop = asyncio.get_running_loop()
-    connection: asyncio.Future[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = (
-        loop.create_future()
-    )
-    context = _create_server_tls_context()
-
-    async def _on_connection(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        peer = writer.get_extra_info("peername")
-        if not peer or peer[0] != controller_ip or connection.done():
-            writer.close()
-            await writer.wait_closed()
-            return
-        connection.set_result((reader, writer))
-
-    server = await asyncio.start_server(
-        _on_connection,
-        host="0.0.0.0",
-        port=listener_port,
-        ssl=context,
-    )
-    session_opened = False
+    network = _local_network()
+    listener = network.listeners.setdefault(listener_port, _ReverseTlsListener(listener_port))
     try:
-        # A controller only accepts the reverse-connection request after the
-        # client has performed local discovery from the same UDP source port.
-        discovery_reply: asyncio.Future[bytes] = loop.create_future()
-        transport, protocol = await loop.create_datagram_endpoint(
-            lambda: _ProbeProtocol(
-                discovery_reply,
-                device_info_probe_packet(),
-                expected_packet_type=onet.reply_type(onet.PacketType.DEVICE_INFO),
-            ),
-            local_addr=("0.0.0.0", LOCAL_UDP_PORT),
-            remote_addr=(controller_ip, LOCAL_UDP_PORT),
-        )
+        await listener.async_acquire()
+    except OSError as err:
+        raise OaseLocalTransportError(f"unable to listen for TLS on port {listener_port}") from err
+
+    connection: asyncio.Future[tuple[asyncio.StreamReader, asyncio.StreamWriter]] | None = None
+    session: OaseLocalTlsSession | None = None
+    try:
+        connection = listener.expect(controller_ip)
+        try:
+            async with network.udp_lock:
+                await _async_request_reverse_connection(controller_ip, listener_port, timeout)
+            reader, writer = await asyncio.wait_for(connection, timeout)
+        finally:
+            listener.forget(controller_ip, connection)
+        session = OaseLocalTlsSession(reader, writer, listener)
+        return session
+    except (ConnectionError, OSError, TimeoutError, ValueError) as err:
+        raise OaseLocalTransportError(
+            f"controller did not establish TLS on port {listener_port}"
+        ) from err
+    finally:
+        if session is None:
+            _abort_unclaimed_connection(connection)
+            listener.release()
+
+
+async def _async_request_reverse_connection(
+    controller_ip: str, listener_port: int, timeout: float
+) -> None:
+    """Ask a controller over UDP to open a TLS connection back to this host."""
+    loop = asyncio.get_running_loop()
+    # A controller only accepts the reverse-connection request after the
+    # client has performed local discovery from the same UDP source port.
+    discovery_reply: asyncio.Future[bytes] = loop.create_future()
+    transport, protocol = await loop.create_datagram_endpoint(
+        lambda: _ProbeProtocol(
+            discovery_reply,
+            device_info_probe_packet(),
+            expected_packet_type=onet.reply_type(onet.PacketType.DEVICE_INFO),
+        ),
+        local_addr=("0.0.0.0", LOCAL_UDP_PORT),
+        remote_addr=(controller_ip, LOCAL_UDP_PORT),
+    )
+    try:
         discovery = await asyncio.wait_for(discovery_reply, timeout)
         discovery_packet = onet.parse_packet(discovery)
         onet.parse_discovery_reply(discovery_packet.payload)
@@ -535,21 +670,26 @@ async def async_open_tls_session(
             tcp_connection_request_packet(listener_port),
             expected_packet_type=onet.reply_type(onet.PacketType.TCP_REQ),
         )
-        response = await asyncio.wait_for(reply, timeout)
-        _validate_tcp_connection_reply(response)
-        reader, writer = await asyncio.wait_for(connection, timeout)
-        session_opened = True
-        return OaseLocalTlsSession(reader, writer, server)
-    except (ConnectionError, OSError, TimeoutError, ValueError) as err:
-        raise OaseLocalTransportError(
-            f"controller did not establish TLS on port {listener_port}"
-        ) from err
+        _validate_tcp_connection_reply(await asyncio.wait_for(reply, timeout))
     finally:
-        if "transport" in locals():
-            transport.close()
-        if not session_opened:
-            server.close()
-            await server.wait_closed()
+        await _async_close_datagram(transport)
+
+
+def _abort_unclaimed_connection(
+    connection: asyncio.Future[tuple[asyncio.StreamReader, asyncio.StreamWriter]] | None,
+) -> None:
+    """Drop a controller connection that arrived for a failed attempt.
+
+    Leaving it open would leak the transport and keep the listener's
+    ``wait_closed`` from ever returning.
+    """
+    if connection is None:
+        return
+    if not connection.done():
+        connection.cancel()
+    elif not connection.cancelled() and connection.exception() is None:
+        _reader, writer = connection.result()
+        writer.transport.abort()
 
 
 def _validate_tcp_connection_reply(data: bytes) -> None:
