@@ -140,3 +140,26 @@ async def test_device_switch_is_unavailable_when_the_device_is_disconnected(hass
     coordinator.data = Inventory(user=None, gateways=[_fm_master(device)])
 
     assert OaseDeviceSwitch(coordinator, "gateway-id", device).available is False
+
+
+async def test_device_switch_is_named_after_its_device(hass):
+    """The pump switch does not repeat the device name in its friendly name."""
+    device = Device(
+        id="pump-id",
+        device_number=12345,
+        article_number=75923,
+        device_type="GardenPump",
+        is_connected=True,
+        is_active=True,
+        pump_state=None,
+        has_rdm=True,
+        custom_attributes=None,
+        product_name="AquaMax 5000",
+    )
+    coordinator = OaseDataUpdateCoordinator(hass, AsyncMock())
+    coordinator.data = Inventory(user=None, gateways=[_fm_master(device)])
+
+    switch = OaseDeviceSwitch(coordinator, "gateway-id", device)
+
+    assert switch.name is None
+    assert switch.device_info["name"] == "AquaMax 5000"

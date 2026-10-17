@@ -29,7 +29,7 @@ async def async_setup_entry(
 
 
 class OaseGatewayOnline(OaseEntity, BinarySensorEntity):
-    """Whether a gateway is reachable through OASE Cloud."""
+    """Whether a gateway is reachable, through OASE Cloud or the local network."""
 
     _attr_name = "Online"
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY

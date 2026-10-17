@@ -70,9 +70,11 @@ class OaseSocketSwitch(OaseEntity, SwitchEntity):
 class OaseDeviceSwitch(OaseDeviceEntity, SwitchEntity):
     """The EGC-level on/off state of an attached device, such as a pump."""
 
+    # The device's main feature: the entity takes the device's own name.
+    _attr_name = None
+
     def __init__(self, coordinator, gateway_id: str, device: Device) -> None:
         super().__init__(coordinator, gateway_id, device)
-        self._attr_name = device.product_name or f"{device.device_type} {device.device_number}"
         self._attr_unique_id = f"{gateway_id}_device_{device.device_number}_on"
 
     @property
