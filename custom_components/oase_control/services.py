@@ -19,6 +19,7 @@ from .local import (
 )
 
 SERVICE_LOCAL_READ = "local_read"
+_LOCAL_ERRORS = (ConnectionError, OSError, TimeoutError, ValueError)
 ATTR_GATEWAY_ID = "gateway_id"
 
 _SERVICE_LOCAL_READ_SCHEMA = vol.Schema(
@@ -38,35 +39,27 @@ def async_setup_services(hass: HomeAssistant) -> None:
             hass, call.data.get(ATTR_GATEWAY_ID)
         )
         try:
-            discovered = await async_discover_controllers()
+            discovered = await async_discover_controllers(serial_number=serial_number)
             matches = [result for result in discovered if result.info.serial_number == serial_number]
             if not matches:
                 raise HomeAssistantError("local controller was not found by O-Net discovery")
-            if len(matches) > 1:
-                raise HomeAssistantError("O-Net discovery found multiple controllers with this serial number")
-            session = await async_open_tls_session(matches[0].host)
+            host = matches[0].host
+            session = await async_open_tls_session(host)
             try:
                 await session.async_authenticate(credential)
-                reply = await session.async_request(onet.PacketType.GET_LIVE_SCENE)
                 egc_devices = await async_read_egc_devices(session)
+                # Only FM-Master controllers have a socket scene; read it last
+                # so its absence cannot hide the EGC result.
+                scene = await _async_read_live_scene(session)
             finally:
                 await session.async_close()
-        except OaseLocalTransportError as err:
+        except (OaseLocalTransportError, *_LOCAL_ERRORS) as err:
             raise HomeAssistantError(f"OASE local read failed: {err}") from err
 
-        scene = onet.parse_live_scene_reply(reply.payload)
         return {
             "gateway_id": gateway_id,
-            "host": matches[0].host,
-            "packet_type": f"0x{reply.packet_type:04x}",
-            "transaction_number": reply.transaction_number,
-            "scene": {
-                "type": scene.type,
-                "id": scene.id,
-                "count": scene.count,
-                "scene_type": scene.scene_type,
-                "data_hex": scene.data.hex(),
-            },
+            "host": host,
+            "scene": scene,
             "egc_devices": [_egc_device_response(device) for device in egc_devices],
         }
 
@@ -108,6 +101,26 @@ def _cached_controller(hass: HomeAssistant, gateway_id: str | None) -> tuple[str
     if not controllers:
         raise HomeAssistantError("No cached local controller credential is available")
     raise HomeAssistantError("gateway_id is required when multiple local controllers are configured")
+
+
+async def _async_read_live_scene(session) -> dict[str, int | str] | None:
+    """Read the controller's live socket scene, or None if it has none."""
+    try:
+        reply = await session.async_request(onet.PacketType.GET_LIVE_SCENE)
+        if reply.packet_type != onet.reply_type(onet.PacketType.GET_LIVE_SCENE):
+            return None
+        scene = onet.parse_live_scene_reply(reply.payload)
+    except (OaseLocalTransportError, *_LOCAL_ERRORS):
+        return None
+    return {
+        "packet_type": f"0x{reply.packet_type:04x}",
+        "transaction_number": reply.transaction_number,
+        "type": scene.type,
+        "id": scene.id,
+        "count": scene.count,
+        "scene_type": scene.scene_type,
+        "data_hex": scene.data.hex(),
+    }
 
 
 def _egc_device_response(device) -> dict[str, int | str]:
