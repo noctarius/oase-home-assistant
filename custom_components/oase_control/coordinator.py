@@ -46,6 +46,7 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         self._initial_local_update_task: asyncio.Task[None] | None = None
         self._local_read_lock = asyncio.Lock()
         self._local_refresh_running = False
+        self._local_refresh_pending = False
 
     def async_start_local_updates(self) -> None:
         """Start frequent local status reads independently of cloud inventory polls."""
@@ -62,13 +63,31 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
             self.async_refresh_local_state(), "oase_control_initial_local_read"
         )
 
-    async def async_refresh_local_state(self) -> None:
-        """Refresh only local state, preserving the last known inventory topology."""
-        if self.data is None or self._local_refresh_running:
+    async def async_refresh_local_state(self, *, follow_up: bool = False) -> None:
+        """Refresh only local state, preserving the last known inventory topology.
+
+        ``follow_up`` requests another pass when a refresh is already running,
+        so a write is never reported with a value read before it was applied.
+        """
+        if self.data is None or not self.local_credentials:
+            return
+        if self._local_refresh_running:
+            self._local_refresh_pending |= follow_up
             return
         self._local_refresh_running = True
         try:
-            self.async_set_updated_data(await self._async_apply_local_reads(self.data))
+            while True:
+                self._local_refresh_pending = False
+                states = await self._async_read_local_states(self.data)
+                if states and self.data is not None:
+                    # Overlay onto the current inventory rather than the one the
+                    # read started from: a cloud refresh may have completed in
+                    # the meantime.  async_set_updated_data is deliberately not
+                    # used, because it would reset the cloud polling interval.
+                    self.data = _inventory_with_local_states(self.data, states)
+                    self.async_update_listeners()
+                if not self._local_refresh_pending:
+                    return
         finally:
             self._local_refresh_running = False
 
@@ -77,7 +96,7 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         if await self._async_set_local_egc_parameter(
             gateway_id, device_number, rdm.Pid.DEVICE_ON, bytes([onet.ON if on else onet.OFF])
         ):
-            await self.async_refresh_local_state()
+            await self.async_refresh_local_state(follow_up=True)
             return
         await self.client.async_set_device_on(gateway_id, device_number, on)
         await self.async_request_refresh()
@@ -87,7 +106,7 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         if await self._async_set_local_egc_parameter(
             gateway_id, device_number, rdm.Pid.PUMP_POWER, bytes([max(0, min(255, int(raw)))])
         ):
-            await self.async_refresh_local_state()
+            await self.async_refresh_local_state(follow_up=True)
             return
         await self.client.async_set_pump_power(gateway_id, device_number, raw)
         await self.async_request_refresh()
@@ -138,28 +157,31 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
 
     async def _async_apply_local_reads(self, inventory: Inventory) -> Inventory:
         """Prefer confirmed local EGC state without making a local failure fatal."""
+        return _inventory_with_local_states(inventory, await self._async_read_local_states(inventory))
+
+    async def _async_read_local_states(
+        self, inventory: Inventory
+    ) -> dict[str, tuple[LocalEgcDeviceState, ...]]:
+        """Read every reachable gateway's EGC bus, keyed by gateway id."""
         await self.local_sessions.async_prune({gateway.id for gateway in inventory.gateways})
         if not self.local_credentials:
-            return inventory
+            return {}
         # A periodic status refresh can overlap a cloud inventory refresh.  The
         # controller speaks a request/reply protocol over one TLS stream, so
         # serialise reads to prevent replies being consumed by the wrong caller.
         async with self._local_read_lock:
-            gateways: list[Gateway] = []
+            states: dict[str, tuple[LocalEgcDeviceState, ...]] = {}
             for gateway in inventory.gateways:
                 credential = self.local_credentials.get(gateway.id)
                 if not credential or not gateway.serial_number:
-                    gateways.append(gateway)
                     continue
                 try:
-                    states = await self.local_sessions.async_read_egc_devices(
+                    states[gateway.id] = await self.local_sessions.async_read_egc_devices(
                         gateway.id, gateway.serial_number, credential
                     )
                 except OaseLocalTransportError:
-                    gateways.append(gateway)
                     continue
-                gateways.append(_gateway_with_local_state(gateway, states))
-            return replace(inventory, gateways=gateways)
+            return states
 
     async def _async_set_local_egc_parameter(
         self, gateway_id: str, device_number: int, pid: int, value: bytes
@@ -244,6 +266,21 @@ def _device_with_rdm_capabilities(device: Device, raw_device: Any) -> Device:
             ),
         )
     return replace(device, supported_pids=supported_pids)
+
+
+def _inventory_with_local_states(
+    inventory: Inventory, states: Mapping[str, tuple[LocalEgcDeviceState, ...]]
+) -> Inventory:
+    """Overlay local reads on the gateways they were read from."""
+    if not states:
+        return inventory
+    return replace(
+        inventory,
+        gateways=[
+            _gateway_with_local_state(gateway, states[gateway.id]) if gateway.id in states else gateway
+            for gateway in inventory.gateways
+        ],
+    )
 
 
 def _gateway_with_local_state(

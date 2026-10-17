@@ -1,11 +1,15 @@
 """Tests for OASE cloud inventory refreshes."""
 
 import asyncio
+from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import pytest
 
+from homeassistant.core import callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.util import dt as dt_util
+from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from pyoase import Device, Gateway, Inventory, OaseAuthError, rdm
 
@@ -15,6 +19,18 @@ from custom_components.oase_control.coordinator import (
     _gateway_with_local_state,
 )
 from custom_components.oase_control.local import LocalEgcDeviceState
+
+
+def _local_gateway(gateway_id: str = "gateway-id", *, is_online: bool = False) -> Gateway:
+    return Gateway(
+        id=gateway_id,
+        serial_number="606300063406",
+        article_number=55317,
+        gateway_type="GatewayCloudEsp",
+        is_online=is_online,
+        online_event_time=None,
+        sockets=None,
+    )
 
 
 async def test_coordinator_returns_inventory(hass):
@@ -236,3 +252,74 @@ def test_local_egc_device_state_two_means_off():
     )
 
     assert updated.devices[0].pump_state.device_on is False
+
+
+async def test_local_status_refreshes_do_not_postpone_cloud_polling(hass):
+    """The 30 s cloud poll keeps running while 5 s local refreshes publish state."""
+    client = AsyncMock()
+    del client.async_get_inventory_raw
+    client.async_get_inventory.return_value = Inventory(user=None, gateways=[_local_gateway()])
+    coordinator = OaseDataUpdateCoordinator(
+        hass, client, local_credentials={"gateway-id": "credential"}
+    )
+    coordinator.local_sessions.async_read_egc_devices = AsyncMock(return_value=())
+    await coordinator.async_refresh()
+    unsubscribe = coordinator.async_add_listener(callback(lambda: None))
+    coordinator.async_start_local_updates()
+    await hass.async_block_till_done()
+    polls_before = client.async_get_inventory.await_count
+
+    now = dt_util.utcnow()
+    for step in range(1, 25):
+        async_fire_time_changed(hass, now + timedelta(seconds=5 * step))
+        await hass.async_block_till_done()
+
+    unsubscribe()
+    await coordinator.async_close()
+    assert client.async_get_inventory.await_count - polls_before >= 3
+
+
+async def test_local_status_refresh_keeps_inventory_updated_during_the_read(hass):
+    """A cloud refresh finishing mid-read is not reverted by the local overlay."""
+    coordinator = OaseDataUpdateCoordinator(
+        hass, AsyncMock(), local_credentials={"gateway-id": "credential"}
+    )
+    coordinator.data = Inventory(user=None, gateways=[_local_gateway()])
+    newer = Inventory(user=None, gateways=[_local_gateway(), _local_gateway("new-gateway")])
+
+    async def _read(*_args):
+        coordinator.data = newer
+        return ()
+
+    coordinator.local_sessions.async_read_egc_devices = _read
+
+    await coordinator.async_refresh_local_state()
+
+    assert [gateway.id for gateway in coordinator.data.gateways] == ["gateway-id", "new-gateway"]
+    assert coordinator.data.gateways[0].is_online is True
+
+
+async def test_local_write_refresh_runs_after_an_in_flight_read(hass):
+    """A refresh requested by a write is not dropped when a poll is running."""
+    coordinator = OaseDataUpdateCoordinator(
+        hass, AsyncMock(), local_credentials={"gateway-id": "credential"}
+    )
+    coordinator.data = Inventory(user=None, gateways=[_local_gateway()])
+    release = asyncio.Event()
+    reads = 0
+
+    async def _read(*_args):
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            await release.wait()
+        return ()
+
+    coordinator.local_sessions.async_read_egc_devices = _read
+    poll = hass.async_create_task(coordinator.async_refresh_local_state())
+    await asyncio.sleep(0)
+    await coordinator.async_refresh_local_state(follow_up=True)
+    release.set()
+    await poll
+
+    assert reads == 2
