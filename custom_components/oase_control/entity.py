@@ -60,6 +60,12 @@ class OaseDeviceEntity(OaseEntity):
         )
 
     @property
+    def device_reachable(self) -> bool:
+        """Whether the gateway is online and currently sees this device."""
+        device = self.device
+        return bool(self.gateway and self.gateway.is_online and device and device.is_connected)
+
+    @property
     def device_info(self) -> DeviceInfo:
         device = self.device
         name = (

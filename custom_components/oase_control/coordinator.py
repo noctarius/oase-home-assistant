@@ -6,10 +6,10 @@ import asyncio
 import base64
 from dataclasses import replace
 import logging
-from typing import Any, Mapping
+from typing import Any, Awaitable, Mapping
 
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers.event import async_track_time_interval
 
@@ -98,8 +98,7 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         ):
             await self.async_refresh_local_state(follow_up=True)
             return
-        await self.client.async_set_device_on(gateway_id, device_number, on)
-        await self.async_request_refresh()
+        await self._async_cloud_command(self.client.async_set_device_on(gateway_id, device_number, on))
 
     async def async_set_pump_power(self, gateway_id: str, device_number: int, raw: int) -> None:
         """Set a pump's power locally when possible, otherwise use the cloud relay."""
@@ -108,7 +107,28 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         ):
             await self.async_refresh_local_state(follow_up=True)
             return
-        await self.client.async_set_pump_power(gateway_id, device_number, raw)
+        await self._async_cloud_command(self.client.async_set_pump_power(gateway_id, device_number, raw))
+
+    async def async_set_socket(self, gateway_id: str, socket: onet.Socket, on: bool) -> None:
+        """Switch an FM-Master outlet through the cloud relay."""
+        await self._async_cloud_command(self.client.async_set_socket(gateway_id, socket, on))
+
+    async def async_set_dimmer(self, gateway_id: str, on: bool, brightness: int | None = None) -> None:
+        """Set an FM-Master dimmer's level, then its on/off state, through the cloud relay."""
+
+        async def _async_command() -> None:
+            if brightness is not None:
+                await self.client.async_set_dimmer_value(gateway_id, brightness)
+            await self.client.async_set_socket(gateway_id, onet.Socket.DIMMER_ONOFF, on)
+
+        await self._async_cloud_command(_async_command())
+
+    async def _async_cloud_command(self, command: Awaitable[Any]) -> None:
+        """Run one cloud relay command and refresh the inventory afterwards."""
+        try:
+            await command
+        except OaseError as err:
+            raise HomeAssistantError(f"OASE Cloud command failed: {err}") from err
         await self.async_request_refresh()
 
     async def async_close(self) -> None:

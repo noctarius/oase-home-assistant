@@ -61,12 +61,10 @@ class OaseSocketSwitch(OaseEntity, SwitchEntity):
         return super().available and bool(self.gateway and self.gateway.is_online)
 
     async def async_turn_on(self, **kwargs) -> None:
-        await self.coordinator.client.async_set_socket(self.gateway_id, self.socket, True)
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.async_set_socket(self.gateway_id, self.socket, True)
 
     async def async_turn_off(self, **kwargs) -> None:
-        await self.coordinator.client.async_set_socket(self.gateway_id, self.socket, False)
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.async_set_socket(self.gateway_id, self.socket, False)
 
 
 class OaseDeviceSwitch(OaseDeviceEntity, SwitchEntity):
@@ -81,6 +79,10 @@ class OaseDeviceSwitch(OaseDeviceEntity, SwitchEntity):
     def is_on(self) -> bool | None:
         device = self.device
         return device.pump_state.device_on if device and device.pump_state else None
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.device_reachable
 
     async def async_turn_on(self, **kwargs) -> None:
         await self.coordinator.async_set_device_on(self.gateway_id, self.device_number, True)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -47,7 +48,7 @@ class OaseDeviceConnected(OaseDeviceEntity, BinarySensorEntity):
 
     _attr_name = "Connected"
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
-    _attr_entity_category = "diagnostic"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator, gateway_id: str, device: Device) -> None:
         super().__init__(coordinator, gateway_id, device)

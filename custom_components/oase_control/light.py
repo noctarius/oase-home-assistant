@@ -6,8 +6,6 @@ from homeassistant.components.light import ATTR_BRIGHTNESS, ColorMode, LightEnti
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from pyoase import onet
-
 from . import OaseConfigEntry
 from .entity import OaseEntity
 
@@ -47,12 +45,7 @@ class OaseDimmerLight(OaseEntity, LightEntity):
         return self.gateway.sockets.dimmer_value if self.gateway and self.gateway.sockets else None
 
     async def async_turn_on(self, **kwargs) -> None:
-        brightness = kwargs.get(ATTR_BRIGHTNESS)
-        if brightness is not None:
-            await self.coordinator.client.async_set_dimmer_value(self.gateway_id, brightness)
-        await self.coordinator.client.async_set_socket(self.gateway_id, onet.Socket.DIMMER_ONOFF, True)
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.async_set_dimmer(self.gateway_id, True, kwargs.get(ATTR_BRIGHTNESS))
 
     async def async_turn_off(self, **kwargs) -> None:
-        await self.coordinator.client.async_set_socket(self.gateway_id, onet.Socket.DIMMER_ONOFF, False)
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.async_set_dimmer(self.gateway_id, False)

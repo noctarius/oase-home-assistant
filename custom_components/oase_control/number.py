@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from homeassistant.components.number import NumberEntity
+from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.const import PERCENTAGE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -36,7 +36,7 @@ class OasePumpPowerNumber(OaseDeviceEntity, NumberEntity):
     _attr_native_min_value = 0
     _attr_native_max_value = 100
     _attr_native_step = 1
-    _attr_mode = "slider"
+    _attr_mode = NumberMode.SLIDER
 
     def __init__(self, coordinator, gateway_id: str, device: Device) -> None:
         super().__init__(coordinator, gateway_id, device)
@@ -51,12 +51,7 @@ class OasePumpPowerNumber(OaseDeviceEntity, NumberEntity):
 
     @property
     def available(self) -> bool:
-        device = self.device
-        return (
-            super().available
-            and bool(self.gateway and self.gateway.is_online)
-            and bool(device and device.is_connected)
-        )
+        return super().available and self.device_reachable
 
     async def async_set_native_value(self, value: float) -> None:
         """Write the pump's raw RDM power parameter through the O-Net relay."""
