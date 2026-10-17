@@ -14,6 +14,7 @@ from custom_components.oase_control import local
 from custom_components.oase_control.local import (
     LOCAL_TCP_PORT,
     LOCAL_UDP_PORT,
+    LocalDiscoveryResult,
     OaseLocalAuthenticationError,
     OaseLocalCredentialError,
     OaseLocalSessionManager,
@@ -454,3 +455,62 @@ async def test_session_close_aborts_a_controller_that_never_completes_tls_shutdo
 
     writer.transport.abort.assert_called_once()
     listener.release.assert_called_once()
+
+
+async def test_failed_connects_back_off_until_the_retry_time():
+    """An unreachable controller is not rediscovered on every status refresh."""
+    manager = OaseLocalSessionManager()
+    connect = AsyncMock(side_effect=OaseLocalTransportError("not found"))
+    manager._async_connect = connect
+
+    for _ in range(2):
+        with pytest.raises(OaseLocalTransportError):
+            await manager.async_read_egc_devices("gateway-id", "serial", "credential")
+    connect.assert_awaited_once()
+
+    manager._backoff["gateway-id"] = local._ReconnectBackoff(0.0, 1, hash("credential"))
+    with pytest.raises(OaseLocalTransportError):
+        await manager.async_read_egc_devices("gateway-id", "serial", "credential")
+    assert connect.await_count == 2
+    assert manager._backoff["gateway-id"].failures == 2
+
+
+async def test_rejected_credential_backs_off_longest_but_a_new_one_is_tried_at_once():
+    """A wrong password is not retried every 5 s, but a refreshed one is."""
+    manager = OaseLocalSessionManager()
+    session = AsyncMock()
+    connect = AsyncMock(side_effect=[OaseLocalAuthenticationError("rejected"), session])
+    manager._async_connect = connect
+    loop_time = asyncio.get_running_loop().time()
+
+    with pytest.raises(OaseLocalAuthenticationError):
+        await manager.async_read_egc_devices("gateway-id", "serial", "old")
+    assert manager._backoff["gateway-id"].retry_at >= loop_time + local._RECONNECT_BACKOFF_MAX
+
+    with patch.object(local, "async_read_egc_devices", AsyncMock(return_value=())):
+        assert await manager.async_read_egc_devices("gateway-id", "serial", "new") == ()
+    assert "gateway-id" not in manager._backoff
+
+
+async def test_discovery_ends_once_the_wanted_controller_answered():
+    """A known controller does not wait for the whole discovery window."""
+    payload = bytearray(324)
+    payload[2:7] = b"OASE\0"
+    payload[34:47] = b"606300063406\0"
+    reply = onet.encode_packet(onet.reply_type(onet.PacketType.DEVICE_INFO), bytes(payload))
+    loop = asyncio.get_running_loop()
+
+    async def _endpoint(factory, sock):
+        protocol = factory()
+        protocol.datagram_received(reply, ("10.0.0.2", LOCAL_UDP_PORT))
+        return Mock(), protocol
+
+    with (
+        patch.object(local.socket, "socket", return_value=Mock()),
+        patch.object(loop, "create_datagram_endpoint", _endpoint),
+    ):
+        results = await asyncio.wait_for(
+            async_discover_controllers(timeout=30, serial_number="606300063406"), 1
+        )
+
+    assert results == [LocalDiscoveryResult("10.0.0.2", results[0].info)]

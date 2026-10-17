@@ -38,6 +38,9 @@ _MAX_PAYLOAD_LENGTH: Final = 64 * 1024
 # A dead controller never answers TLS close_notify; don't wait 30 s for it.
 _CLOSE_TIMEOUT: Final = 2.0
 _SESSION_ERRORS: Final = (ConnectionError, OSError, TimeoutError, ValueError)
+# Reconnect delays after failed connects; a rejected credential waits longest.
+_RECONNECT_BACKOFF_MIN: Final = 5.0
+_RECONNECT_BACKOFF_MAX: Final = 300.0
 
 _T = TypeVar("_T")
 
@@ -264,12 +267,22 @@ async def _async_close_datagram(transport: asyncio.BaseTransport) -> None:
     await asyncio.sleep(0)
 
 
+@dataclass(frozen=True)
+class _ReconnectBackoff:
+    """When a gateway may be connected again after consecutive failures."""
+
+    retry_at: float
+    failures: int
+    credential_hash: int
+
+
 class OaseLocalSessionManager:
     """Keep one authenticated reverse-TLS session open per local controller."""
 
     def __init__(self) -> None:
         self._sessions: dict[str, OaseLocalTlsSession] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._backoff: dict[str, _ReconnectBackoff] = {}
         self._closed = False
 
     async def async_read_egc_devices(
@@ -309,6 +322,7 @@ class OaseLocalSessionManager:
             )
             self._sessions.clear()
             self._locks.clear()
+            self._backoff.clear()
         finally:
             for lock in locks:
                 lock.release()
@@ -323,6 +337,7 @@ class OaseLocalSessionManager:
                 continue
             async with lock:
                 await self._async_drop(gateway_id)
+                self._backoff.pop(gateway_id, None)
                 if self._locks.get(gateway_id) is lock:
                     del self._locks[gateway_id]
 
@@ -360,7 +375,9 @@ class OaseLocalSessionManager:
                 session = self._sessions.get(gateway_id)
                 reused = session is not None
                 if session is None:
-                    session = await self._async_connect(gateway_id, serial_number, password)
+                    session = await self._async_connect_with_backoff(
+                        gateway_id, serial_number, password
+                    )
                 try:
                     return await operation(session)
                 except (*_SESSION_ERRORS, OaseLocalTransportError) as err:
@@ -375,10 +392,42 @@ class OaseLocalSessionManager:
                     await self._async_drop(gateway_id, abort=True)
                     raise
 
+    async def _async_connect_with_backoff(
+        self, gateway_id: str, serial_number: str, password: str
+    ) -> OaseLocalTlsSession:
+        """Connect unless recent attempts failed, backing off exponentially.
+
+        Without this an unreachable controller costs a discovery window, and a
+        reachable one a full TLS setup, on every 5 s status refresh. A changed
+        credential is tried immediately.
+        """
+        now = asyncio.get_running_loop().time()
+        credential_hash = hash(password)
+        backoff = self._backoff.get(gateway_id)
+        if backoff is not None and backoff.credential_hash != credential_hash:
+            backoff = None
+        if backoff is not None and now < backoff.retry_at:
+            raise OaseLocalTransportError("waiting before reconnecting to the local controller")
+        try:
+            session = await self._async_connect(gateway_id, serial_number, password)
+        except OaseLocalTransportError as err:
+            failures = backoff.failures + 1 if backoff is not None else 1
+            delay = (
+                _RECONNECT_BACKOFF_MAX
+                if isinstance(err, OaseLocalAuthenticationError)
+                else min(_RECONNECT_BACKOFF_MIN * 2 ** (failures - 1), _RECONNECT_BACKOFF_MAX)
+            )
+            self._backoff[gateway_id] = _ReconnectBackoff(
+                asyncio.get_running_loop().time() + delay, failures, credential_hash
+            )
+            raise
+        self._backoff.pop(gateway_id, None)
+        return session
+
     async def _async_connect(
         self, gateway_id: str, serial_number: str, password: str
     ) -> OaseLocalTlsSession:
-        controllers = await async_discover_controllers()
+        controllers = await async_discover_controllers(serial_number=serial_number)
         matches = [item for item in controllers if item.info.serial_number == serial_number]
         if len(matches) != 1:
             raise OaseLocalTransportError("controller was not uniquely found by local discovery")
@@ -554,21 +603,26 @@ def device_info_probe_packet() -> bytes:
     return onet.encode_packet(onet.PacketType.DEVICE_INFO)
 
 
-async def async_discover_controllers(*, timeout: float = 3.0) -> list[LocalDiscoveryResult]:
+async def async_discover_controllers(
+    *, timeout: float = 3.0, serial_number: str | None = None
+) -> list[LocalDiscoveryResult]:
     """Discover local controllers using O-Net UDP broadcast and multicast.
 
     This is O-Net discovery, not DNS-SD: DEVICE_INFO is sent to UDP/5959 on
     both the IPv4 limited broadcast address and OASE's multicast group. Replies
-    are deduplicated by controller serial number.
+    are deduplicated by controller serial number. With ``serial_number`` the
+    window ends as soon as that controller has answered.
     """
     async with _local_network().udp_lock:
         try:
-            return await _async_discover_controllers(timeout)
+            return await _async_discover_controllers(timeout, serial_number)
         except OSError as err:
             raise OaseLocalTransportError(f"local discovery failed on UDP {LOCAL_UDP_PORT}") from err
 
 
-async def _async_discover_controllers(timeout: float) -> list[LocalDiscoveryResult]:
+async def _async_discover_controllers(
+    timeout: float, serial_number: str | None
+) -> list[LocalDiscoveryResult]:
     loop = asyncio.get_running_loop()
     replies: asyncio.Queue[tuple[bytes, tuple[str, int]]] = asyncio.Queue()
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -597,6 +651,8 @@ async def _async_discover_controllers(timeout: float) -> list[LocalDiscoveryResu
             result = _parse_discovery_result(data, address[0])
             if result is not None:
                 results.setdefault(result.info.serial_number or result.host, result)
+                if serial_number is not None and result.info.serial_number == serial_number:
+                    break
         return sorted(results.values(), key=lambda result: (result.info.serial_number, result.host))
     finally:
         await _async_close_datagram(transport)
