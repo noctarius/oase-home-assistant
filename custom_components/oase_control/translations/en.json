@@ -7,6 +7,13 @@
           "password": "Password"
         },
         "description": "Sign in to your OASE Control cloud account."
+      },
+      "reauth_confirm": {
+        "data": {
+          "email": "OASE account email",
+          "password": "Password"
+        },
+        "description": "The OASE Control credentials are no longer valid. Sign in again."
       }
     },
     "error": {
@@ -16,7 +23,8 @@
     },
     "abort": {
       "already_configured": "This OASE account is already configured.",
-      "reauth_successful": "OASE Control credentials were updated."
+      "reauth_successful": "OASE Control credentials were updated.",
+      "wrong_account": "Sign in with the OASE account this entry was set up with."
     }
   }
 }

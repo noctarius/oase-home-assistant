@@ -19,7 +19,9 @@ yet.
   after TLS. Its 64-byte credential payload is followed by a one-byte reply:
   `1` accepts the credentials and `2` rejects them.
 - The corresponding credential is provided by the cloud inventory in the
-  gateway's `customAttributesJson` attribute `101`. It is kept in memory only.
+  gateway's `customAttributesJson` attribute `101`. It is refreshed on every
+  cloud inventory poll and cached in the config entry so local control keeps
+  working during cloud outages. It is never logged.
 
 ## First verification step
 
@@ -28,9 +30,11 @@ sends a read-only `DEVICE_INFO` O-Net packet directly to that address and
 validates a matching reply. It intentionally does not broadcast onto the
 network.
 
-`async_open_tls_session(host)` starts a temporary TLS server, sends the reverse
-connection request, and returns an `OaseLocalTlsSession` after the controller
-connects. The session's `async_request()` method is available for controlled,
+`async_open_tls_session(host)` takes a lease on the shared TLS listener for the
+port (one listener serves every controller, routing connections by address),
+sends the reverse connection request, and returns an `OaseLocalTlsSession`
+after the controller connects. Closing the session returns the lease; the
+listener stops once no session needs it. The session's `async_request()` method is available for controlled,
 read-only O-Net request/reply validation.
 
 ## Unresolved before local control

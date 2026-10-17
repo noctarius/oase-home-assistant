@@ -2,68 +2,54 @@
 
 from __future__ import annotations
 
-import logging
-
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.typing import ConfigType
 
-from pyoase import OaseAuth, OaseCloudClient, OaseError
+from pyoase import OaseAuth, OaseCloudClient
 
 from .const import CONF_LOCAL_CREDENTIALS, DOMAIN, PLATFORMS
 from .coordinator import OaseDataUpdateCoordinator
-from .local import local_credentials_from_inventory
 from .services import async_setup_services
 
-_LOGGER = logging.getLogger(__name__)
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 type OaseConfigEntry = ConfigEntry[OaseDataUpdateCoordinator]
 
 
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the integration's services once."""
+    async_setup_services(hass)
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: OaseConfigEntry) -> bool:
     """Set up OASE Control from a config entry."""
-    async_setup_services(hass)
     session = async_get_clientsession(hass)
     auth = OaseAuth(session, entry.data[CONF_EMAIL], entry.data[CONF_PASSWORD])
     client = OaseCloudClient(session, auth)
     cached_credentials = entry.data.get(CONF_LOCAL_CREDENTIALS, {})
     coordinator = OaseDataUpdateCoordinator(
-        hass, client, dict(cached_credentials) if isinstance(cached_credentials, dict) else None
+        hass,
+        client,
+        dict(cached_credentials) if isinstance(cached_credentials, dict) else None,
+        config_entry=entry,
     )
+    # Registered before the first refresh, which may already open local
+    # sessions: Home Assistant also runs unload callbacks when setup fails.
+    entry.async_on_unload(coordinator.async_close)
 
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
-    await _async_cache_local_credentials(hass, entry, client)
-    refreshed_credentials = entry.data.get(CONF_LOCAL_CREDENTIALS, {})
-    if isinstance(refreshed_credentials, dict):
-        coordinator.local_credentials = dict(refreshed_credentials)
     coordinator.async_start_local_updates()
     _async_remove_invalid_fm_master_entities(hass, entry, coordinator)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
-
-
-async def _async_cache_local_credentials(
-    hass: HomeAssistant, entry: OaseConfigEntry, client: OaseCloudClient
-) -> None:
-    """Cache cloud-provided local credentials without logging their values."""
-    try:
-        fetched = local_credentials_from_inventory(await client.async_get_inventory_raw())
-    except OaseError:
-        _LOGGER.debug("Unable to refresh local controller credentials from the cloud")
-        return
-    if not fetched:
-        return
-
-    existing = entry.data.get(CONF_LOCAL_CREDENTIALS, {})
-    cached = dict(existing) if isinstance(existing, dict) else {}
-    updated = {**cached, **fetched}
-    if updated != cached:
-        hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_LOCAL_CREDENTIALS: updated})
 
 
 def _async_remove_invalid_fm_master_entities(
@@ -84,14 +70,6 @@ def _async_remove_invalid_fm_master_entities(
             registry.async_remove(registered.entity_id)
 
 
-async def _async_update_listener(hass: HomeAssistant, entry: OaseConfigEntry) -> None:
-    """Reload after credentials change during reauthentication."""
-    await hass.config_entries.async_reload(entry.entry_id)
-
-
 async def async_unload_entry(hass: HomeAssistant, entry: OaseConfigEntry) -> bool:
-    """Unload an OASE Control config entry."""
-    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unloaded:
-        await entry.runtime_data.async_close()
-    return unloaded
+    """Unload an OASE Control config entry; local sessions close via on_unload."""
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

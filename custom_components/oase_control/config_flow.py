@@ -21,12 +21,12 @@ class OaseControlConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def async_step_reauth(self, entry_data: dict[str, str]) -> FlowResult:
         """Ask for updated credentials after an OAuth refresh fails."""
-        self._reauth_entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(self, user_input: dict[str, str] | None = None) -> FlowResult:
-        """Validate and save the replacement credentials."""
+        """Validate and save the replacement credentials, then reload the entry."""
         errors: dict[str, str] = {}
+        reauth_entry = self._get_reauth_entry()
         if user_input is not None:
             session = async_get_clientsession(self.hass)
             client = OaseCloudClient(
@@ -42,19 +42,17 @@ class OaseControlConfigFlow(ConfigFlow, domain=DOMAIN):
             except OaseError:
                 errors["base"] = "unknown"
             else:
-                assert self._reauth_entry is not None
-                self.hass.config_entries.async_update_entry(
-                    self._reauth_entry, data={**self._reauth_entry.data, **user_input}
-                )
                 await self.async_set_unique_id(user_input[CONF_EMAIL].lower())
-                return self.async_abort(reason="reauth_successful")
+                self._abort_if_unique_id_mismatch(reason="wrong_account")
+                # Reloading here also recovers an entry whose setup failed
+                # with the old credentials.
+                return self.async_update_reload_and_abort(reauth_entry, data_updates=user_input)
 
-        current_email = self._reauth_entry.data[CONF_EMAIL] if self._reauth_entry else ""
         return self.async_show_form(
             step_id="reauth_confirm",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_EMAIL, default=current_email): str,
+                    vol.Required(CONF_EMAIL, default=reauth_entry.data[CONF_EMAIL]): str,
                     vol.Required(CONF_PASSWORD): str,
                 }
             ),

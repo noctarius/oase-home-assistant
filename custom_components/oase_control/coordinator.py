@@ -8,18 +8,20 @@ from dataclasses import replace
 import logging
 from typing import Any, Awaitable, Mapping
 
-from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers.event import async_track_time_interval
 
 from pyoase import Device, Gateway, Inventory, OaseAuthError, OaseError, PumpState, onet, rdm
 
-from .const import DOMAIN, LOCAL_UPDATE_INTERVAL, UPDATE_INTERVAL
+from .const import CONF_LOCAL_CREDENTIALS, DOMAIN, LOCAL_UPDATE_INTERVAL, UPDATE_INTERVAL
 from .local import (
     LocalEgcDeviceState,
     OaseLocalTransportError,
     OaseLocalSessionManager,
+    local_credentials_from_inventory,
 )
 from .transport import OaseTransport
 
@@ -31,11 +33,17 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
     """Poll the OASE inventory and expose it to all entities."""
 
     def __init__(
-        self, hass: HomeAssistant, client: OaseTransport, local_credentials: dict[str, str] | None = None
+        self,
+        hass: HomeAssistant,
+        client: OaseTransport,
+        local_credentials: dict[str, str] | None = None,
+        *,
+        config_entry: ConfigEntry | None = None,
     ) -> None:
         super().__init__(
             hass,
             logger=_LOGGER,
+            config_entry=config_entry,
             name=DOMAIN,
             update_interval=UPDATE_INTERVAL,
         )
@@ -147,6 +155,7 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
             raw_inventory = await self._async_get_raw_inventory()
             if raw_inventory is not None:
                 inventory = _inventory_with_rdm_capabilities(Inventory.from_dict(raw_inventory), raw_inventory)
+                self._async_update_local_credentials(raw_inventory, inventory)
             else:
                 inventory = await self.client.async_get_inventory()
         except OaseAuthError as err:
@@ -160,6 +169,28 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
                 return local
             raise UpdateFailed(f"Error communicating with OASE Cloud: {err}") from err
         return await self._async_apply_local_reads(inventory)
+
+    @callback
+    def _async_update_local_credentials(
+        self, raw_inventory: Mapping[str, Any], inventory: Inventory
+    ) -> None:
+        """Follow the cloud's local credentials, keeping a copy for cloud outages.
+
+        Credentials are persisted in the config entry so that local control
+        keeps working when the cloud is unreachable at startup. They are
+        limited to gateways still in the inventory and never logged.
+        """
+        gateway_ids = {gateway.id for gateway in inventory.gateways}
+        merged = {**self.local_credentials, **local_credentials_from_inventory(raw_inventory)}
+        updated = {gateway_id: value for gateway_id, value in merged.items() if gateway_id in gateway_ids}
+        if updated == self.local_credentials:
+            return
+        self.local_credentials = updated
+        if self.config_entry is not None:
+            self.hass.config_entries.async_update_entry(
+                self.config_entry,
+                data={**self.config_entry.data, CONF_LOCAL_CREDENTIALS: updated},
+            )
 
     async def _async_get_raw_inventory(self) -> dict[str, Any] | None:
         """Prefer the raw cloud response when the transport exposes it."""

@@ -544,9 +544,8 @@ async def async_set_egc_parameter(
 def local_credential_from_inventory(inventory: Mapping[str, Any], gateway_id: str) -> str:
     """Return one gateway's local credential from a cloud inventory response.
 
-    The credential remains in memory only. Callers must neither log the return
-    value nor place it in a config entry or other persistent Home Assistant
-    storage.
+    Callers must never log the return value. The integration persists it in
+    its config entry only so that local control survives cloud outages.
     """
     gateways = inventory.get("gateways")
     if not isinstance(gateways, list):
