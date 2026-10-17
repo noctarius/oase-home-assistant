@@ -60,9 +60,6 @@ class OasePumpPowerNumber(OaseDeviceEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         """Write the pump's raw RDM power parameter through the O-Net relay."""
-        await self.coordinator.client.async_set_pump_power(
-            self.gateway_id,
-            self.device_number,
-            rdm.percent_to_raw(value),
+        await self.coordinator.async_set_pump_power(
+            self.gateway_id, self.device_number, rdm.percent_to_raw(value)
         )
-        await self.coordinator.async_request_refresh()

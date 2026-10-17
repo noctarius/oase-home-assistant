@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from pyoase import onet
+from pyoase import onet, rdm
 
 from custom_components.oase_control.local import (
     LOCAL_TCP_PORT,
@@ -14,6 +14,7 @@ from custom_components.oase_control.local import (
     OaseLocalTlsSession,
     _create_server_tls_context,
     _parse_discovery_result,
+    async_set_egc_parameter,
     device_info_probe_packet,
     local_credential_from_inventory,
     local_credentials_from_inventory,
@@ -114,6 +115,31 @@ async def test_tls_session_rejects_a_wrong_password_check_packet_type():
 
     with pytest.raises(OaseLocalAuthenticationError, match="unexpected password check reply type"):
         await session.async_authenticate("credential")
+
+
+async def test_local_rdm_set_writes_the_requested_parameter_and_requires_an_ack():
+    """A local write uses an RDM SET frame and validates its corresponding reply."""
+    device_number = 2148503843
+    response = rdm.build_frame(
+        rdm.CONTROLLER_UID,
+        rdm.CommandClass.SET_COMMAND_RESPONSE,
+        rdm.Pid.DEVICE_ON,
+        source=rdm.Uid.for_device(device_number),
+        port_id=rdm.ResponseType.ACK,
+    )
+    session = OaseLocalTlsSession(AsyncMock(), AsyncMock(), AsyncMock())
+    session.async_request = AsyncMock(
+        return_value=onet.OnetPacket(onet.reply_type(rdm.RDM_REQUEST), response)
+    )
+
+    await async_set_egc_parameter(session, device_number, rdm.Pid.DEVICE_ON, b"\xff")
+
+    packet_type, frame = session.async_request.await_args.args
+    request = rdm.parse_frame(frame)
+    assert packet_type == rdm.RDM_REQUEST
+    assert request.command_class == rdm.CommandClass.SET_COMMAND
+    assert request.pid == rdm.Pid.DEVICE_ON
+    assert request.data == b"\xff"
 
 
 def test_local_credential_is_extracted_from_the_matching_gateway_only():

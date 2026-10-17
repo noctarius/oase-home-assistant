@@ -7,7 +7,7 @@ import pytest
 
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
-from pyoase import Device, Gateway, Inventory, OaseAuthError
+from pyoase import Device, Gateway, Inventory, OaseAuthError, rdm
 
 from custom_components.oase_control.coordinator import (
     OaseDataUpdateCoordinator,
@@ -89,6 +89,34 @@ async def test_local_reads_are_serialized_across_inventory_and_status_updates(ha
 
     release_first_read.set()
     await asyncio.gather(first, second)
+
+
+async def test_device_write_prefers_the_local_session(hass):
+    """A reachable controller receives EGC writes without waiting for the cloud."""
+    gateway = Gateway(
+        id="gateway-id",
+        serial_number="606300063406",
+        article_number=55317,
+        gateway_type="GatewayCloudEsp",
+        is_online=True,
+        online_event_time=None,
+        sockets=None,
+    )
+    client = AsyncMock()
+    coordinator = OaseDataUpdateCoordinator(
+        hass, client, local_credentials={"gateway-id": "credential"}
+    )
+    coordinator.data = Inventory(user=None, gateways=[gateway])
+    coordinator.local_sessions.async_set_egc_parameter = AsyncMock()
+    coordinator.async_refresh_local_state = AsyncMock()
+
+    await coordinator.async_set_device_on("gateway-id", 2148503843, True)
+
+    coordinator.local_sessions.async_set_egc_parameter.assert_awaited_once_with(
+        "gateway-id", "606300063406", "credential", 2148503843, rdm.Pid.DEVICE_ON, b"\xff"
+    )
+    client.async_set_device_on.assert_not_awaited()
+    coordinator.async_refresh_local_state.assert_awaited_once()
 
 
 def test_cached_rdm_data_enables_only_confirmed_pump_controls():

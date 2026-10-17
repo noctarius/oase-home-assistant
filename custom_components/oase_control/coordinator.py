@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import base64
 import asyncio
+import base64
 from dataclasses import replace
 import logging
 from typing import Any, Mapping
@@ -13,7 +13,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers.event import async_track_time_interval
 
-from pyoase import Device, Gateway, Inventory, OaseAuthError, OaseError, PumpState, rdm
+from pyoase import Device, Gateway, Inventory, OaseAuthError, OaseError, PumpState, onet, rdm
 
 from .const import DOMAIN, LOCAL_UPDATE_INTERVAL, UPDATE_INTERVAL
 from .local import (
@@ -70,6 +70,26 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
             self.async_set_updated_data(await self._async_apply_local_reads(self.data))
         finally:
             self._local_refresh_running = False
+
+    async def async_set_device_on(self, gateway_id: str, device_number: int, on: bool) -> None:
+        """Set an EGC device locally when possible, otherwise use the cloud relay."""
+        if await self._async_set_local_egc_parameter(
+            gateway_id, device_number, rdm.Pid.DEVICE_ON, bytes([onet.ON if on else onet.OFF])
+        ):
+            await self.async_refresh_local_state()
+            return
+        await self.client.async_set_device_on(gateway_id, device_number, on)
+        await self.async_request_refresh()
+
+    async def async_set_pump_power(self, gateway_id: str, device_number: int, raw: int) -> None:
+        """Set a pump's power locally when possible, otherwise use the cloud relay."""
+        if await self._async_set_local_egc_parameter(
+            gateway_id, device_number, rdm.Pid.PUMP_POWER, bytes([max(0, min(255, int(raw)))])
+        ):
+            await self.async_refresh_local_state()
+            return
+        await self.client.async_set_pump_power(gateway_id, device_number, raw)
+        await self.async_request_refresh()
 
     async def async_close(self) -> None:
         """Release local reverse-TLS sessions when the config entry unloads."""
@@ -134,6 +154,22 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
                     continue
                 gateways.append(_gateway_with_local_state(gateway, states))
             return replace(inventory, gateways=gateways)
+
+    async def _async_set_local_egc_parameter(
+        self, gateway_id: str, device_number: int, pid: int, value: bytes
+    ) -> bool:
+        """Write locally only when a discovered gateway has cached credentials."""
+        gateway = self.data.gateway(gateway_id) if self.data else None
+        credential = self.local_credentials.get(gateway_id)
+        if not gateway or not gateway.serial_number or not credential:
+            return False
+        try:
+            await self.local_sessions.async_set_egc_parameter(
+                gateway_id, gateway.serial_number, credential, device_number, pid, value
+            )
+        except OaseLocalTransportError:
+            return False
+        return True
 
 
 def _inventory_with_rdm_capabilities(

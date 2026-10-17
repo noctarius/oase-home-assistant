@@ -83,9 +83,7 @@ class OaseDeviceSwitch(OaseDeviceEntity, SwitchEntity):
         return device.pump_state.device_on if device and device.pump_state else None
 
     async def async_turn_on(self, **kwargs) -> None:
-        await self.coordinator.client.async_set_device_on(self.gateway_id, self.device_number, True)
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.async_set_device_on(self.gateway_id, self.device_number, True)
 
     async def async_turn_off(self, **kwargs) -> None:
-        await self.coordinator.client.async_set_device_on(self.gateway_id, self.device_number, False)
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.async_set_device_on(self.gateway_id, self.device_number, False)

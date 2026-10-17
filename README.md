@@ -2,10 +2,9 @@
 
 ![OASE logo](OASE_Logo_Standard_rgb.svg)
 
-Cloud-first custom integration for OASE InScenio / FM-Master controllers. It is
-built on [`pyoase`](https://github.com/deltasystems-pl/pyoase), so outlet and
-EGC/RDM commands use the same O-Net frame codec that can later support a local
-transport.
+Custom integration for OASE InScenio / FM-Master controllers. It is built on
+[`pyoase`](https://github.com/deltasystems-pl/pyoase) for cloud inventory and
+O-Net frame handling.
 
 ## Current scope
 
@@ -14,17 +13,19 @@ transport.
 - Gateway availability and type
 - FM-Master sockets 1–3 as switches
 - Dimmable outlet as a brightness light
-- Attached EGC devices' own on/off state, when the cloud reports it as controllable
+- Attached EGC devices' own on/off state
 - Attached EGC pump power as a 0–100% number entity
+- Local-first reads and writes for discovered EGC devices; cloud relay fallback
+  when local communication is unavailable
 
-The integration deliberately uses OASE Cloud for transport. It does not make
-direct LAN connections yet: the controller's local protocol requires UDP
-discovery and a reverse TLS connection, whereas the cloud relay is reliable and
-already uses identical O-Net payloads.
+The initial inventory and local controller credential come from OASE Cloud.
+After setup, the integration discovers the controller on the LAN and uses its
+authenticated reverse-TLS connection for EGC status updates and supported pump
+controls. It falls back to the cloud relay if the local controller cannot be
+reached.
 
-Local-transport research is tracked in
-[docs/local-transport.md](docs/local-transport.md). It is deliberately
-read-only and not exposed as a Home Assistant setup option yet.
+Local-transport details are tracked in
+[docs/local-transport.md](docs/local-transport.md).
 
 ## Install with HACS
 

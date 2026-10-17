@@ -1,9 +1,7 @@
-"""Experimental local transport building blocks for OASE controllers.
+"""Local transport primitives for OASE controllers.
 
 The local setup is controller-initiated: after a UDP request on port 5959, the
-controller opens a TLS connection back to a listener on port 5999. This module
-is deliberately not wired into the config flow while local O-Net commands are
-being validated against hardware.
+controller opens a TLS connection back to a listener on port 5999.
 """
 
 from __future__ import annotations
@@ -133,24 +131,51 @@ class OaseLocalSessionManager:
 
     def __init__(self) -> None:
         self._sessions: dict[str, OaseLocalTlsSession] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
 
     async def async_read_egc_devices(
         self, gateway_id: str, serial_number: str, password: str
     ) -> tuple[LocalEgcDeviceState, ...]:
         """Read a gateway, reconnecting through discovery once if necessary."""
-        session = self._sessions.get(gateway_id)
-        if session is None:
-            session = await self._async_connect(gateway_id, serial_number, password)
-        try:
-            return await async_read_egc_devices(session)
-        except (ConnectionError, OSError, TimeoutError, ValueError, OaseLocalTransportError):
-            await self._async_drop(gateway_id)
-            session = await self._async_connect(gateway_id, serial_number, password)
+        async with self._locks.setdefault(gateway_id, asyncio.Lock()):
+            session = self._sessions.get(gateway_id)
+            if session is None:
+                session = await self._async_connect(gateway_id, serial_number, password)
             try:
                 return await async_read_egc_devices(session)
             except (ConnectionError, OSError, TimeoutError, ValueError, OaseLocalTransportError):
                 await self._async_drop(gateway_id)
-                raise
+                session = await self._async_connect(gateway_id, serial_number, password)
+                try:
+                    return await async_read_egc_devices(session)
+                except (ConnectionError, OSError, TimeoutError, ValueError, OaseLocalTransportError):
+                    await self._async_drop(gateway_id)
+                    raise
+
+    async def async_set_egc_parameter(
+        self,
+        gateway_id: str,
+        serial_number: str,
+        password: str,
+        device_number: int,
+        pid: int,
+        value: bytes,
+    ) -> None:
+        """Set one EGC RDM parameter, reconnecting once if the session failed."""
+        async with self._locks.setdefault(gateway_id, asyncio.Lock()):
+            session = self._sessions.get(gateway_id)
+            if session is None:
+                session = await self._async_connect(gateway_id, serial_number, password)
+            try:
+                await async_set_egc_parameter(session, device_number, pid, value)
+            except (ConnectionError, OSError, TimeoutError, ValueError, OaseLocalTransportError):
+                await self._async_drop(gateway_id)
+                session = await self._async_connect(gateway_id, serial_number, password)
+                try:
+                    await async_set_egc_parameter(session, device_number, pid, value)
+                except (ConnectionError, OSError, TimeoutError, ValueError, OaseLocalTransportError):
+                    await self._async_drop(gateway_id)
+                    raise
 
     async def async_close(self) -> None:
         """Close every reverse-TLS listener and session owned by this manager."""
@@ -158,6 +183,7 @@ class OaseLocalSessionManager:
             *(session.async_close() for session in self._sessions.values()), return_exceptions=True
         )
         self._sessions.clear()
+        self._locks.clear()
 
     async def _async_connect(
         self, gateway_id: str, serial_number: str, password: str
@@ -241,6 +267,30 @@ async def _async_rdm_get(
         return None
     response = rdm.parse_frame(reply.payload)
     return response.data if response.checksum_valid and response.is_ack else None
+
+
+async def async_set_egc_parameter(
+    session: OaseLocalTlsSession,
+    device_number: int,
+    pid: int,
+    value: bytes,
+    *,
+    timeout: float = 5.0,
+) -> None:
+    """Write one RDM parameter and require an acknowledged matching reply."""
+    frame = rdm.build_frame(
+        rdm.Uid.for_device(device_number), rdm.CommandClass.SET_COMMAND, pid, value
+    )
+    reply = await session.async_request(rdm.RDM_REQUEST, frame, timeout=timeout)
+    if reply.packet_type != onet.reply_type(rdm.RDM_REQUEST):
+        raise OaseLocalTransportError("controller returned an unexpected RDM set reply")
+    response = rdm.parse_frame(reply.payload)
+    if not response.checksum_valid:
+        raise OaseLocalTransportError("controller returned an RDM set reply with invalid checksum")
+    if not response.is_ack:
+        raise OaseLocalTransportError(f"controller did not acknowledge RDM PID 0x{int(pid):04x}")
+    if response.command_class != rdm.CommandClass.SET_COMMAND_RESPONSE or response.pid != int(pid):
+        raise OaseLocalTransportError("controller returned a mismatched RDM set reply")
 
 
 def local_credential_from_inventory(inventory: Mapping[str, Any], gateway_id: str) -> str:
