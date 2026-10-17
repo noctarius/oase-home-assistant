@@ -43,6 +43,7 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         self.local_credentials = local_credentials or {}
         self.local_sessions = OaseLocalSessionManager()
         self._cancel_local_updates = None
+        self._initial_local_update_task: asyncio.Task[None] | None = None
         self._local_read_lock = asyncio.Lock()
         self._local_refresh_running = False
 
@@ -57,7 +58,7 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         self._cancel_local_updates = async_track_time_interval(
             self.hass, _async_update, LOCAL_UPDATE_INTERVAL, cancel_on_shutdown=True
         )
-        self.hass.async_create_background_task(
+        self._initial_local_update_task = self.hass.async_create_background_task(
             self.async_refresh_local_state(), "oase_control_initial_local_read"
         )
 
@@ -96,6 +97,10 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         if self._cancel_local_updates is not None:
             self._cancel_local_updates()
             self._cancel_local_updates = None
+        if self._initial_local_update_task is not None:
+            self._initial_local_update_task.cancel()
+            await asyncio.gather(self._initial_local_update_task, return_exceptions=True)
+            self._initial_local_update_task = None
         await self.local_sessions.async_close()
 
     async def _async_update_data(self) -> Inventory:
@@ -133,6 +138,7 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
 
     async def _async_apply_local_reads(self, inventory: Inventory) -> Inventory:
         """Prefer confirmed local EGC state without making a local failure fatal."""
+        await self.local_sessions.async_prune({gateway.id for gateway in inventory.gateways})
         if not self.local_credentials:
             return inventory
         # A periodic status refresh can overlap a cloud inventory refresh.  The

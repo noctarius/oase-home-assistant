@@ -1,5 +1,6 @@
 """Tests for the local O-Net transport primitives."""
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -11,7 +12,9 @@ from custom_components.oase_control.local import (
     LOCAL_UDP_PORT,
     OaseLocalAuthenticationError,
     OaseLocalCredentialError,
+    OaseLocalSessionManager,
     OaseLocalTlsSession,
+    OaseLocalTransportError,
     _create_server_tls_context,
     _parse_discovery_result,
     async_set_egc_parameter,
@@ -140,6 +143,30 @@ async def test_local_rdm_set_writes_the_requested_parameter_and_requires_an_ack(
     assert request.command_class == rdm.CommandClass.SET_COMMAND
     assert request.pid == rdm.Pid.DEVICE_ON
     assert request.data == b"\xff"
+
+
+async def test_closed_session_manager_cannot_open_a_new_connection():
+    """An unloading config entry cannot be resurrected by an in-flight poll."""
+    manager = OaseLocalSessionManager()
+
+    await manager.async_close()
+
+    with pytest.raises(OaseLocalTransportError, match="closed"):
+        await manager.async_read_egc_devices("gateway-id", "606300063406", "credential")
+
+
+async def test_session_manager_prunes_removed_gateway_resources():
+    """Sessions and locks are bounded by the gateway inventory."""
+    manager = OaseLocalSessionManager()
+    session = AsyncMock()
+    manager._sessions["removed-gateway"] = session
+    manager._locks["removed-gateway"] = asyncio.Lock()
+
+    await manager.async_prune(set())
+
+    session.async_close.assert_awaited_once()
+    assert manager._sessions == {}
+    assert manager._locks == {}
 
 
 def test_local_credential_is_extracted_from_the_matching_gateway_only():

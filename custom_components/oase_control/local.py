@@ -132,12 +132,14 @@ class OaseLocalSessionManager:
     def __init__(self) -> None:
         self._sessions: dict[str, OaseLocalTlsSession] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._closed = False
 
     async def async_read_egc_devices(
         self, gateway_id: str, serial_number: str, password: str
     ) -> tuple[LocalEgcDeviceState, ...]:
         """Read a gateway, reconnecting through discovery once if necessary."""
         async with self._locks.setdefault(gateway_id, asyncio.Lock()):
+            self._raise_if_closed()
             session = self._sessions.get(gateway_id)
             if session is None:
                 session = await self._async_connect(gateway_id, serial_number, password)
@@ -163,6 +165,7 @@ class OaseLocalSessionManager:
     ) -> None:
         """Set one EGC RDM parameter, reconnecting once if the session failed."""
         async with self._locks.setdefault(gateway_id, asyncio.Lock()):
+            self._raise_if_closed()
             session = self._sessions.get(gateway_id)
             if session is None:
                 session = await self._async_connect(gateway_id, serial_number, password)
@@ -179,11 +182,36 @@ class OaseLocalSessionManager:
 
     async def async_close(self) -> None:
         """Close every reverse-TLS listener and session owned by this manager."""
-        await asyncio.gather(
-            *(session.async_close() for session in self._sessions.values()), return_exceptions=True
-        )
-        self._sessions.clear()
-        self._locks.clear()
+        self._closed = True
+        locks = tuple(self._locks.values())
+        for lock in locks:
+            await lock.acquire()
+        try:
+            await asyncio.gather(
+                *(session.async_close() for session in self._sessions.values()), return_exceptions=True
+            )
+            self._sessions.clear()
+            self._locks.clear()
+        finally:
+            for lock in locks:
+                lock.release()
+
+    async def async_prune(self, gateway_ids: set[str]) -> None:
+        """Release sessions and locks belonging to gateways no longer in inventory."""
+        for gateway_id in tuple(self._locks):
+            if gateway_id in gateway_ids:
+                continue
+            lock = self._locks.get(gateway_id)
+            if lock is None:
+                continue
+            async with lock:
+                await self._async_drop(gateway_id)
+            self._locks.pop(gateway_id, None)
+
+    def _raise_if_closed(self) -> None:
+        """Reject work started after the config entry has been unloaded."""
+        if self._closed:
+            raise OaseLocalTransportError("local session manager is closed")
 
     async def _async_connect(
         self, gateway_id: str, serial_number: str, password: str
@@ -483,6 +511,7 @@ async def async_open_tls_session(
         port=listener_port,
         ssl=context,
     )
+    session_opened = False
     try:
         # A controller only accepts the reverse-connection request after the
         # client has performed local discovery from the same UDP source port.
@@ -509,16 +538,18 @@ async def async_open_tls_session(
         response = await asyncio.wait_for(reply, timeout)
         _validate_tcp_connection_reply(response)
         reader, writer = await asyncio.wait_for(connection, timeout)
+        session_opened = True
         return OaseLocalTlsSession(reader, writer, server)
     except (ConnectionError, OSError, TimeoutError, ValueError) as err:
-        server.close()
-        await server.wait_closed()
         raise OaseLocalTransportError(
             f"controller did not establish TLS on port {listener_port}"
         ) from err
     finally:
         if "transport" in locals():
             transport.close()
+        if not session_opened:
+            server.close()
+            await server.wait_closed()
 
 
 def _validate_tcp_connection_reply(data: bytes) -> None:
