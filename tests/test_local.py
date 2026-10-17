@@ -3,7 +3,8 @@
 import asyncio
 import socket
 import ssl
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
@@ -21,7 +22,9 @@ from custom_components.oase_control.local import (
     _create_server_tls_context,
     _local_network,
     _parse_discovery_result,
+    async_discover_controllers,
     async_open_tls_session,
+    async_read_egc_devices,
     async_set_egc_parameter,
     device_info_probe_packet,
     local_credential_from_inventory,
@@ -304,3 +307,150 @@ async def test_opened_tls_session_releases_the_listener_when_closed(socket_enabl
     clients[0][1].close()
     await session.async_close()
     assert listener._server is None
+
+
+def _patched_connect(manager: OaseLocalSessionManager, *sessions):
+    """Make the manager's connects hand out the given sessions in order."""
+    connect = AsyncMock(side_effect=list(sessions))
+
+    async def _connect(gateway_id, *_args):
+        session = await connect(gateway_id)
+        manager._sessions[gateway_id] = session
+        return session
+
+    manager._async_connect = _connect
+    return connect
+
+
+async def test_cancelled_authentication_closes_the_new_session():
+    """Cancelling a connect must not leak the TLS session and listener lease."""
+    session = AsyncMock()
+    session.async_authenticate.side_effect = asyncio.CancelledError
+    found = SimpleNamespace(host="192.0.2.1", info=SimpleNamespace(serial_number="serial"))
+    manager = OaseLocalSessionManager()
+
+    with (
+        patch.object(local, "async_discover_controllers", AsyncMock(return_value=[found])),
+        patch.object(local, "async_open_tls_session", AsyncMock(return_value=session)),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await manager._async_connect("gateway-id", "serial", "credential")
+
+    session.async_close.assert_awaited_once_with(abort=True)
+    assert manager._sessions == {}
+
+
+async def test_cancelled_request_drops_the_out_of_sync_session():
+    """A reply left unread by a cancelled request must not reach the next caller."""
+    session = AsyncMock()
+    manager = OaseLocalSessionManager()
+    manager._sessions["gateway-id"] = session
+
+    with (
+        patch.object(local, "async_read_egc_devices", AsyncMock(side_effect=asyncio.CancelledError)),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await manager.async_read_egc_devices("gateway-id", "serial", "credential")
+
+    session.async_close.assert_awaited_once_with(abort=True)
+    assert manager._sessions == {}
+
+
+async def test_stale_session_is_replaced_once():
+    """A broken persistent session is reconnected and the request retried."""
+    stale = AsyncMock()
+    fresh = AsyncMock()
+    manager = OaseLocalSessionManager()
+    manager._sessions["gateway-id"] = stale
+    connect = _patched_connect(manager, fresh)
+    read = AsyncMock(side_effect=[TimeoutError, ()])
+
+    with patch.object(local, "async_read_egc_devices", read):
+        assert await manager.async_read_egc_devices("gateway-id", "serial", "credential") == ()
+
+    connect.assert_awaited_once()
+    stale.async_close.assert_awaited_once_with(abort=True)
+    assert manager._sessions == {"gateway-id": fresh}
+
+
+async def test_failure_on_a_fresh_session_is_reported_without_reconnecting():
+    """A new session that fails immediately is not hammered with reconnects."""
+    fresh = AsyncMock()
+    manager = OaseLocalSessionManager()
+    connect = _patched_connect(manager, fresh)
+
+    with (
+        patch.object(local, "async_read_egc_devices", AsyncMock(side_effect=OSError)),
+        pytest.raises(OaseLocalTransportError),
+    ):
+        await manager.async_read_egc_devices("gateway-id", "serial", "credential")
+
+    connect.assert_awaited_once()
+    assert manager._sessions == {}
+
+
+async def test_discovery_socket_errors_are_transport_errors_and_close_the_socket():
+    """A busy UDP port neither escapes as OSError nor leaks the socket."""
+    udp_socket = Mock()
+    udp_socket.bind.side_effect = OSError("address in use")
+
+    with (
+        patch.object(local.socket, "socket", return_value=udp_socket),
+        pytest.raises(OaseLocalTransportError),
+    ):
+        await async_discover_controllers()
+
+    udp_socket.close.assert_called_once()
+
+
+async def test_mismatched_rdm_get_reply_is_rejected():
+    """A reply for another parameter means the stream is out of sync."""
+    discovery = onet.OnetPacket(onet.reply_type(rdm.EGC_DISCOVERY), b"")
+    wrong_pid = rdm.build_frame(
+        rdm.CONTROLLER_UID,
+        rdm.CommandClass.GET_COMMAND_RESPONSE,
+        rdm.Pid.PUMP_POWER,
+        b"\x80",
+        source=rdm.Uid.for_device(12345),
+        port_id=rdm.ResponseType.ACK,
+    )
+    session = OaseLocalTlsSession(AsyncMock(), AsyncMock(), AsyncMock())
+    session.async_request = AsyncMock(
+        side_effect=[discovery, onet.OnetPacket(onet.reply_type(rdm.RDM_REQUEST), wrong_pid)]
+    )
+
+    with (
+        patch.object(rdm, "parse_discovery_reply", return_value=[
+            SimpleNamespace(article_number=1, device_number=12345, manufacturer_id=1, subdevice_count=0)
+        ]),
+        pytest.raises(OaseLocalTransportError, match="mismatched"),
+    ):
+        await async_read_egc_devices(session)
+
+
+async def test_oversized_reply_header_is_rejected():
+    """A corrupt length field cannot make the reader buffer gigabytes."""
+    reader = AsyncMock()
+    reader.readexactly.return_value = onet.encode_packet(0x10FF)[:4] + b"\xff\xff\xff\x7f" + bytes(8)
+    session = OaseLocalTlsSession(reader, Mock(drain=AsyncMock()), AsyncMock())
+
+    with pytest.raises(OaseLocalTransportError, match="maximum"):
+        await session.async_request(onet.PacketType.DEVICE_INFO)
+
+    reader.readexactly.assert_awaited_once_with(16)
+
+
+async def test_session_close_aborts_a_controller_that_never_completes_tls_shutdown():
+    """A vanished controller cannot hold the gateway lock for the TLS timeout."""
+    never = asyncio.get_running_loop().create_future()
+    writer = MagicMock()
+    writer.wait_closed = Mock(return_value=never)
+    listener = Mock()
+    session = OaseLocalTlsSession(AsyncMock(), writer, listener)
+
+    with patch.object(local, "_CLOSE_TIMEOUT", 0.01):
+        await session.async_close()
+        await session.async_close()
+
+    writer.transport.abort.assert_called_once()
+    listener.release.assert_called_once()

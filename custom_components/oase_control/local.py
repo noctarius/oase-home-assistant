@@ -7,6 +7,8 @@ controller opens a TLS connection back to a listener on port 5999.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 import ipaddress
@@ -17,7 +19,7 @@ import ssl
 import struct
 import tempfile
 import time
-from typing import Any, Final, Mapping
+from typing import Any, Final, Mapping, TypeVar
 import weakref
 
 from pyoase import onet, rdm
@@ -31,6 +33,13 @@ _CERTIFICATE_VALIDITY: Final = timedelta(days=14)
 # Regenerate well before expiry; a listener may outlive one certificate.
 _CERTIFICATE_ROTATION: Final = timedelta(days=7)
 _LOCAL_CREDENTIAL_ATTRIBUTE_ID: Final = 101
+# Replies are small; anything larger means the stream is out of sync.
+_MAX_PAYLOAD_LENGTH: Final = 64 * 1024
+# A dead controller never answers TLS close_notify; don't wait 30 s for it.
+_CLOSE_TIMEOUT: Final = 2.0
+_SESSION_ERRORS: Final = (ConnectionError, OSError, TimeoutError, ValueError)
+
+_T = TypeVar("_T")
 
 
 class OaseLocalTransportError(RuntimeError):
@@ -88,9 +97,11 @@ class OaseLocalTlsSession:
     ) -> onet.OnetPacket:
         """Send one O-Net request through TLS and return its complete reply."""
         self.writer.write(onet.encode_packet(packet_type, payload, transaction_number))
-        await self.writer.drain()
+        await asyncio.wait_for(self.writer.drain(), timeout)
         header = await asyncio.wait_for(self.reader.readexactly(16), timeout)
         payload_length = struct.unpack_from("<I", header, 4)[0]
+        if payload_length > _MAX_PAYLOAD_LENGTH:
+            raise OaseLocalTransportError("controller reply exceeds the maximum O-Net payload size")
         body = await asyncio.wait_for(self.reader.readexactly(payload_length), timeout)
         return onet.parse_packet(header + body)
 
@@ -119,17 +130,28 @@ class OaseLocalTlsSession:
             raise OaseLocalAuthenticationError("controller rejected local credentials")
         raise OaseLocalAuthenticationError("unknown password check reply state")
 
-    async def async_close(self) -> None:
-        """Close the TLS connection and release the shared listener."""
+    async def async_close(self, *, abort: bool = False) -> None:
+        """Close the TLS connection and release the shared listener.
+
+        ``abort`` drops a connection whose state is unknown without the TLS
+        close handshake. A graceful close falls back to aborting when the
+        controller does not complete it promptly.
+        """
         if self._closed:
             return
         self._closed = True
         try:
+            if abort:
+                self.writer.transport.abort()
+                return
             self.writer.close()
             try:
-                await self.writer.wait_closed()
-            except (ConnectionError, OSError):
-                pass
+                await asyncio.wait_for(self.writer.wait_closed(), _CLOSE_TIMEOUT)
+            except (ConnectionError, OSError, TimeoutError):
+                self.writer.transport.abort()
+        except BaseException:
+            self.writer.transport.abort()
+            raise
         finally:
             self.listener.release()
 
@@ -254,21 +276,9 @@ class OaseLocalSessionManager:
         self, gateway_id: str, serial_number: str, password: str
     ) -> tuple[LocalEgcDeviceState, ...]:
         """Read a gateway, reconnecting through discovery once if necessary."""
-        async with self._locks.setdefault(gateway_id, asyncio.Lock()):
-            self._raise_if_closed()
-            session = self._sessions.get(gateway_id)
-            if session is None:
-                session = await self._async_connect(gateway_id, serial_number, password)
-            try:
-                return await async_read_egc_devices(session)
-            except (ConnectionError, OSError, TimeoutError, ValueError, OaseLocalTransportError):
-                await self._async_drop(gateway_id)
-                session = await self._async_connect(gateway_id, serial_number, password)
-                try:
-                    return await async_read_egc_devices(session)
-                except (ConnectionError, OSError, TimeoutError, ValueError, OaseLocalTransportError):
-                    await self._async_drop(gateway_id)
-                    raise
+        return await self._async_with_session(
+            gateway_id, serial_number, password, async_read_egc_devices
+        )
 
     async def async_set_egc_parameter(
         self,
@@ -280,21 +290,12 @@ class OaseLocalSessionManager:
         value: bytes,
     ) -> None:
         """Set one EGC RDM parameter, reconnecting once if the session failed."""
-        async with self._locks.setdefault(gateway_id, asyncio.Lock()):
-            self._raise_if_closed()
-            session = self._sessions.get(gateway_id)
-            if session is None:
-                session = await self._async_connect(gateway_id, serial_number, password)
-            try:
-                await async_set_egc_parameter(session, device_number, pid, value)
-            except (ConnectionError, OSError, TimeoutError, ValueError, OaseLocalTransportError):
-                await self._async_drop(gateway_id)
-                session = await self._async_connect(gateway_id, serial_number, password)
-                try:
-                    await async_set_egc_parameter(session, device_number, pid, value)
-                except (ConnectionError, OSError, TimeoutError, ValueError, OaseLocalTransportError):
-                    await self._async_drop(gateway_id)
-                    raise
+        await self._async_with_session(
+            gateway_id,
+            serial_number,
+            password,
+            lambda session: async_set_egc_parameter(session, device_number, pid, value),
+        )
 
     async def async_close(self) -> None:
         """Close every reverse-TLS listener and session owned by this manager."""
@@ -322,12 +323,57 @@ class OaseLocalSessionManager:
                 continue
             async with lock:
                 await self._async_drop(gateway_id)
-            self._locks.pop(gateway_id, None)
+                if self._locks.get(gateway_id) is lock:
+                    del self._locks[gateway_id]
 
     def _raise_if_closed(self) -> None:
         """Reject work started after the config entry has been unloaded."""
         if self._closed:
             raise OaseLocalTransportError("local session manager is closed")
+
+    @asynccontextmanager
+    async def _async_gateway_lock(self, gateway_id: str) -> AsyncIterator[None]:
+        """Hold the lock that serialises one controller's request/reply stream.
+
+        A waiter may wake up holding a lock that was pruned meanwhile; it then
+        retries with the current one, so two callers never share a stream.
+        """
+        while True:
+            self._raise_if_closed()
+            lock = self._locks.setdefault(gateway_id, asyncio.Lock())
+            async with lock:
+                if self._locks.get(gateway_id) is lock:
+                    self._raise_if_closed()
+                    yield
+                    return
+
+    async def _async_with_session(
+        self,
+        gateway_id: str,
+        serial_number: str,
+        password: str,
+        operation: Callable[[OaseLocalTlsSession], Awaitable[_T]],
+    ) -> _T:
+        """Run one operation on the gateway's session, replacing a stale one once."""
+        async with self._async_gateway_lock(gateway_id):
+            while True:
+                session = self._sessions.get(gateway_id)
+                reused = session is not None
+                if session is None:
+                    session = await self._async_connect(gateway_id, serial_number, password)
+                try:
+                    return await operation(session)
+                except (*_SESSION_ERRORS, OaseLocalTransportError) as err:
+                    await self._async_drop(gateway_id, abort=True)
+                    if not reused:
+                        if isinstance(err, OaseLocalTransportError):
+                            raise
+                        raise OaseLocalTransportError("local controller request failed") from err
+                except BaseException:
+                    # A cancelled request leaves its reply in the stream; the
+                    # next caller would read it as the answer to its own.
+                    await self._async_drop(gateway_id, abort=True)
+                    raise
 
     async def _async_connect(
         self, gateway_id: str, serial_number: str, password: str
@@ -339,17 +385,21 @@ class OaseLocalSessionManager:
         session = await async_open_tls_session(matches[0].host)
         try:
             await session.async_authenticate(password)
-        except Exception:
-            await session.async_close()
+        except _SESSION_ERRORS as err:
+            await session.async_close(abort=True)
+            raise OaseLocalTransportError("local controller authentication failed") from err
+        except BaseException:
+            await session.async_close(abort=True)
             raise
+        await self._async_drop(gateway_id, abort=True)
         self._sessions[gateway_id] = session
         return session
 
-    async def _async_drop(self, gateway_id: str) -> None:
-        """Forget and close one failed session."""
+    async def _async_drop(self, gateway_id: str, *, abort: bool = False) -> None:
+        """Forget and close one session."""
         session = self._sessions.pop(gateway_id, None)
         if session is not None:
-            await session.async_close()
+            await session.async_close(abort=abort)
 
 
 async def async_read_local_egc_devices(
@@ -410,7 +460,12 @@ async def _async_rdm_get(
     if reply.packet_type != onet.reply_type(rdm.RDM_REQUEST):
         return None
     response = rdm.parse_frame(reply.payload)
-    return response.data if response.checksum_valid and response.is_ack else None
+    if not response.checksum_valid:
+        return None
+    if response.command_class != rdm.CommandClass.GET_COMMAND_RESPONSE or response.pid != int(pid):
+        # Not the reply to this request: the stream is out of sync.
+        raise OaseLocalTransportError("controller returned a mismatched RDM get reply")
+    return response.data if response.is_ack else None
 
 
 async def async_set_egc_parameter(
@@ -507,19 +562,26 @@ async def async_discover_controllers(*, timeout: float = 3.0) -> list[LocalDisco
     are deduplicated by controller serial number.
     """
     async with _local_network().udp_lock:
-        return await _async_discover_controllers(timeout)
+        try:
+            return await _async_discover_controllers(timeout)
+        except OSError as err:
+            raise OaseLocalTransportError(f"local discovery failed on UDP {LOCAL_UDP_PORT}") from err
 
 
 async def _async_discover_controllers(timeout: float) -> list[LocalDiscoveryResult]:
     loop = asyncio.get_running_loop()
     replies: asyncio.Queue[tuple[bytes, tuple[str, int]]] = asyncio.Queue()
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    udp_socket.bind(("0.0.0.0", LOCAL_UDP_PORT))
-    transport, _protocol = await loop.create_datagram_endpoint(
-        lambda: _DiscoveryProtocol(replies), sock=udp_socket
-    )
+    try:
+        udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        udp_socket.bind(("0.0.0.0", LOCAL_UDP_PORT))
+        transport, _protocol = await loop.create_datagram_endpoint(
+            lambda: _DiscoveryProtocol(replies), sock=udp_socket
+        )
+    except BaseException:
+        udp_socket.close()
+        raise
     try:
         packet = device_info_probe_packet()
         transport.sendto(packet, (LOCAL_DISCOVERY_BROADCAST, LOCAL_UDP_PORT))
