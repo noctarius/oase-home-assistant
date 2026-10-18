@@ -47,6 +47,12 @@ _RECONNECT_BACKOFF_MAX: Final = 300.0
 _GET_CLOUD_STATE: Final = 0xA400
 _GET_CLOUD_STATE_REPLY: Final = 0xA4FF
 _CLOUD_STATE_LENGTH: Final = 5
+_NETWORK_CONFIG_REPLY: Final = onet.reply_type(onet.PacketType.NETWORK_CONFIG)
+# The controller's network configuration record contains fixed-width text
+# fields. The connected router SSID begins after the AP SSID (32 bytes) and
+# its channel byte. Credentials are deliberately not decoded or retained.
+_NETWORK_CONFIG_ROUTER_SSID_OFFSET: Final = 34
+_NETWORK_CONFIG_ROUTER_SSID_LENGTH: Final = 32
 
 _T = TypeVar("_T")
 
@@ -100,6 +106,7 @@ class LocalGatewayState:
     egc_devices: tuple[LocalEgcDeviceState, ...]
     sockets: onet.SocketState | None = None
     cloud_connection_enabled: bool | None = None
+    wifi_network: str | None = None
 
 
 @dataclass
@@ -582,7 +589,8 @@ async def async_read_gateway_state(
     egc_devices = await async_read_egc_devices(session, timeout=timeout)
     sockets = await async_read_socket_state(session, timeout=timeout) if read_sockets else None
     cloud_connection_enabled = await async_read_cloud_connection_enabled(session, timeout=timeout)
-    return LocalGatewayState(egc_devices, sockets, cloud_connection_enabled)
+    wifi_network = await async_read_wifi_network(session, timeout=timeout)
+    return LocalGatewayState(egc_devices, sockets, cloud_connection_enabled, wifi_network)
 
 
 async def async_read_cloud_connection_enabled(
@@ -607,6 +615,31 @@ async def async_read_cloud_state(
     if len(reply.payload) != _CLOUD_STATE_LENGTH or reply.payload[0] not in (0, 1):
         raise OaseLocalTransportError("controller returned an invalid cloud-state reply")
     return LocalCloudState(connection_enabled=bool(reply.payload[0]), raw=reply.payload)
+
+
+async def async_read_wifi_network(
+    session: OaseLocalTlsSession, *, timeout: float = 5.0
+) -> str | None:
+    """Read the configured router SSID without exposing network credentials."""
+    reply = await session.async_request(onet.PacketType.NETWORK_CONFIG, timeout=timeout)
+    if reply.packet_type != _NETWORK_CONFIG_REPLY:
+        raise OaseLocalTransportError("controller returned an unexpected network-config reply")
+    return _parse_wifi_network(reply.payload)
+
+
+def _parse_wifi_network(payload: bytes) -> str | None:
+    """Extract a valid NUL-terminated router SSID from a network config record."""
+    end = _NETWORK_CONFIG_ROUTER_SSID_OFFSET + _NETWORK_CONFIG_ROUTER_SSID_LENGTH
+    if len(payload) < end:
+        raise OaseLocalTransportError("controller returned a truncated network-config reply")
+    encoded = payload[_NETWORK_CONFIG_ROUTER_SSID_OFFSET:end].split(b"\0", 1)[0]
+    if not encoded:
+        return None
+    try:
+        ssid = encoded.decode("utf-8")
+    except UnicodeDecodeError as err:
+        raise OaseLocalTransportError("controller returned an invalid router SSID") from err
+    return ssid if ssid.strip() else None
 
 
 async def async_read_socket_state(

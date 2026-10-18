@@ -21,6 +21,7 @@ from custom_components.oase_control.binary_sensor import (
 from custom_components.oase_control.light import async_setup_entry as async_setup_lights
 from custom_components.oase_control.sensor import (
     OaseGatewayFirmwareVersion,
+    OaseGatewayWifiNetwork,
     OaseGatewayWifiFirmwareVersion,
     OaseOperatingHours,
 )
@@ -135,6 +136,18 @@ async def test_gateway_firmware_sensors_report_cloud_only_metadata(hass):
     assert controller.entity_category == "diagnostic"
     assert wifi.native_value == "5.1"
     assert wifi.entity_category == "diagnostic"
+
+
+async def test_gateway_wifi_network_sensor_reports_the_local_ssid(hass):
+    """The configured router name is a local diagnostic value."""
+    coordinator = OaseDataUpdateCoordinator(hass, AsyncMock())
+    coordinator.data = Inventory(user=None, gateways=[_fm_master()])
+    coordinator.local_wifi_networks["gateway-id"] = "Pond network"
+
+    network = OaseGatewayWifiNetwork(coordinator, "gateway-id")
+
+    assert network.native_value == "Pond network"
+    assert network.entity_category == "diagnostic"
 
 
 async def test_operating_hours_sensor_uses_the_local_or_cloud_value(hass):

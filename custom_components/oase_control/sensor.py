@@ -22,6 +22,7 @@ async def async_setup_entry(
             OaseGatewayType(entry.runtime_data, gateway.id),
             OaseGatewayFirmwareVersion(entry.runtime_data, gateway.id),
             OaseGatewayWifiFirmwareVersion(entry.runtime_data, gateway.id),
+            OaseGatewayWifiNetwork(entry.runtime_data, gateway.id),
             *(
                 OaseOperatingHours(entry.runtime_data, gateway.id, device)
                 for device in gateway.devices
@@ -78,6 +79,22 @@ class OaseGatewayWifiFirmwareVersion(OaseEntity, SensorEntity):
     def native_value(self) -> str | None:
         version = self.coordinator.gateway_firmware_versions.get(self.gateway_id)
         return version.wifi_module if version else None
+
+
+class OaseGatewayWifiNetwork(OaseEntity, SensorEntity):
+    """Report the locally configured router SSID without its password."""
+
+    _attr_name = "Wi-Fi network"
+    _attr_icon = "mdi:wifi"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, gateway_id: str) -> None:
+        super().__init__(coordinator, gateway_id)
+        self._attr_unique_id = f"{gateway_id}_wifi_network"
+
+    @property
+    def native_value(self) -> str | None:
+        return self.coordinator.local_wifi_networks.get(self.gateway_id)
 
 
 class OaseOperatingHours(OaseDeviceEntity, SensorEntity):

@@ -21,6 +21,7 @@ from custom_components.oase_control.local import (
     OaseLocalTlsSession,
     OaseLocalTransportError,
     _async_read_operating_hours,
+    _parse_wifi_network,
     _create_server_tls_context,
     _local_network,
     _parse_discovery_result,
@@ -28,6 +29,7 @@ from custom_components.oase_control.local import (
     async_read_cloud_state,
     async_read_cloud_connection_enabled,
     async_read_socket_state,
+    async_read_wifi_network,
     async_open_tls_session,
     async_read_egc_devices,
     async_set_dimmer,
@@ -258,6 +260,27 @@ async def test_local_cloud_state_retains_the_validated_private_record():
 
     assert state.connection_enabled is True
     assert state.raw == b"\x01\x01\x00\x01\x00"
+
+
+async def test_local_wifi_network_read_returns_only_the_router_ssid():
+    """Network configuration exposes the configured router name, not credentials."""
+    payload = bytearray(66)
+    payload[34:66] = b"Pond network\0".ljust(32, b"\0")
+    session = OaseLocalTlsSession(AsyncMock(), AsyncMock(), AsyncMock())
+    session.async_request = AsyncMock(
+        return_value=onet.OnetPacket(onet.reply_type(onet.PacketType.NETWORK_CONFIG), bytes(payload))
+    )
+
+    assert await async_read_wifi_network(session) == "Pond network"
+    session.async_request.assert_awaited_once_with(onet.PacketType.NETWORK_CONFIG, timeout=5.0)
+
+
+def test_local_wifi_network_parser_rejects_truncated_or_invalid_text():
+    """A malformed network record must not be exposed as a Wi-Fi network name."""
+    with pytest.raises(OaseLocalTransportError, match="truncated"):
+        _parse_wifi_network(b"\0" * 65)
+    with pytest.raises(OaseLocalTransportError, match="invalid"):
+        _parse_wifi_network(b"\0" * 34 + b"\xff" + b"\0" * 31)
 
 
 @pytest.mark.parametrize(

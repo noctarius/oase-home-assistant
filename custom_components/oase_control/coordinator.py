@@ -62,6 +62,7 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         self.local_credentials = local_credentials or {}
         self.local_sessions = OaseLocalSessionManager()
         self.local_cloud_connection_enabled: dict[str, bool] = {}
+        self.local_wifi_networks: dict[str, str] = {}
         self.gateway_firmware_versions: dict[str, GatewayFirmwareVersions] = {}
         self.gateway_names: dict[str, str] = {}
         self._cancel_local_updates = None
@@ -107,6 +108,11 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
                         for gateway_id, state in states.items()
                         if isinstance(state, LocalGatewayState)
                         and state.cloud_connection_enabled is not None
+                    }
+                    self.local_wifi_networks = {
+                        gateway_id: state.wifi_network
+                        for gateway_id, state in states.items()
+                        if isinstance(state, LocalGatewayState) and state.wifi_network is not None
                     }
                     # Overlay onto the current inventory rather than the one the
                     # read started from: a cloud refresh may have completed in
@@ -176,6 +182,7 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
             self._initial_local_update_task = None
         await self.local_sessions.async_close()
         self.local_cloud_connection_enabled.clear()
+        self.local_wifi_networks.clear()
         self.gateway_firmware_versions.clear()
         self.gateway_names.clear()
 
@@ -320,6 +327,11 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         self.local_cloud_connection_enabled = {
             gateway_id: enabled
             for gateway_id, enabled in self.local_cloud_connection_enabled.items()
+            if gateway_id in valid_gateway_ids
+        }
+        self.local_wifi_networks = {
+            gateway_id: network
+            for gateway_id, network in self.local_wifi_networks.items()
             if gateway_id in valid_gateway_ids
         }
         if not self.local_credentials:
