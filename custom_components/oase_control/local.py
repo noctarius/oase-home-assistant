@@ -81,6 +81,7 @@ class LocalEgcDeviceState:
     subdevice_count: int
     device_on_raw: bytes | None
     pump_power_raw: bytes | None
+    operating_hours: int | None = None
 
 
 @dataclass(frozen=True)
@@ -558,6 +559,9 @@ async def async_read_egc_devices(
                 pump_power_raw=await _async_rdm_get(
                     session, device.device_number, rdm.Pid.PUMP_POWER, transaction_number, timeout
                 ),
+                operating_hours=await _async_read_operating_hours(
+                    session, device.device_number, transaction_number, timeout
+                ),
             )
         )
     return tuple(devices)
@@ -674,6 +678,20 @@ async def _async_rdm_get(
         # Not the reply to this request: the stream is out of sync.
         raise OaseLocalTransportError("controller returned a mismatched RDM get reply")
     return response.data if response.is_ack else None
+
+
+async def _async_read_operating_hours(
+    session: OaseLocalTlsSession,
+    device_number: int,
+    transaction_number: int,
+    timeout: float,
+) -> int | None:
+    """Read the OASE runtime counter, falling back to standard RDM device hours."""
+    for pid in (rdm.Pid.OPERATING_HOURS, rdm.Pid.DEVICE_HOURS):
+        data = await _async_rdm_get(session, device_number, pid, transaction_number, timeout)
+        if data is not None and len(data) >= 4:
+            return int.from_bytes(data[:4], "big")
+    return None
 
 
 async def async_set_egc_parameter(

@@ -22,6 +22,7 @@ from custom_components.oase_control.light import async_setup_entry as async_setu
 from custom_components.oase_control.sensor import (
     OaseGatewayFirmwareVersion,
     OaseGatewayWifiFirmwareVersion,
+    OaseOperatingHours,
 )
 from custom_components.oase_control.switch import (
     OaseDeviceSwitch,
@@ -134,6 +135,30 @@ async def test_gateway_firmware_sensors_report_cloud_only_metadata(hass):
     assert controller.entity_category == "diagnostic"
     assert wifi.native_value == "5.1"
     assert wifi.entity_category == "diagnostic"
+
+
+async def test_operating_hours_sensor_uses_the_local_or_cloud_value(hass):
+    """The runtime sensor is attached to the EGC device, not its gateway."""
+    device = Device(
+        id="pump-id",
+        device_number=12345,
+        article_number=75923,
+        device_type="GardenPump",
+        is_connected=True,
+        is_active=True,
+        pump_state=None,
+        has_rdm=True,
+        custom_attributes=None,
+        operating_hours=1234,
+    )
+    coordinator = OaseDataUpdateCoordinator(hass, AsyncMock())
+    coordinator.data = Inventory(user=None, gateways=[_fm_master(device)])
+
+    sensor = OaseOperatingHours(coordinator, "gateway-id", device)
+
+    assert sensor.native_value == 1234
+    assert sensor.entity_category == "diagnostic"
+    assert sensor.device_info["via_device"] == ("oase_control", "gateway-id")
 
 
 def _fm_master(*devices: Device) -> Gateway:

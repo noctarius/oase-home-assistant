@@ -20,6 +20,7 @@ from custom_components.oase_control.local import (
     OaseLocalSessionManager,
     OaseLocalTlsSession,
     OaseLocalTransportError,
+    _async_read_operating_hours,
     _create_server_tls_context,
     _local_network,
     _parse_discovery_result,
@@ -157,6 +158,63 @@ async def test_local_rdm_set_writes_the_requested_parameter_and_requires_an_ack(
     assert request.command_class == rdm.CommandClass.SET_COMMAND
     assert request.pid == rdm.Pid.DEVICE_ON
     assert request.data == b"\xff"
+
+
+async def test_local_egc_read_prefers_the_manufacturer_operating_hours_counter():
+    """The local runtime value is a big-endian counter from PID 0x800D."""
+    device_number = 2148503843
+    discovery = onet.OnetPacket(onet.reply_type(rdm.EGC_DISCOVERY), b"")
+
+    def response(pid, data):
+        return onet.OnetPacket(
+            onet.reply_type(rdm.RDM_REQUEST),
+            rdm.build_frame(
+                rdm.CONTROLLER_UID,
+                rdm.CommandClass.GET_COMMAND_RESPONSE,
+                pid,
+                data,
+                source=rdm.Uid.for_device(device_number),
+                port_id=rdm.ResponseType.ACK,
+            ),
+        )
+
+    session = OaseLocalTlsSession(AsyncMock(), AsyncMock(), AsyncMock())
+    session.async_request = AsyncMock(
+        side_effect=[
+            discovery,
+            response(rdm.Pid.DEVICE_ON, b"\xff"),
+            response(rdm.Pid.PUMP_POWER, b"\x80"),
+            response(rdm.Pid.OPERATING_HOURS, (1234).to_bytes(4, "big")),
+        ]
+    )
+
+    with patch.object(
+        rdm,
+        "parse_discovery_reply",
+        return_value=[
+            SimpleNamespace(
+                article_number=1,
+                device_number=device_number,
+                manufacturer_id=1,
+                subdevice_count=0,
+            )
+        ],
+    ):
+        devices = await async_read_egc_devices(session)
+
+    assert devices[0].operating_hours == 1234
+    hour_request = rdm.parse_frame(session.async_request.await_args_list[-1].args[1])
+    assert hour_request.pid == rdm.Pid.OPERATING_HOURS
+
+
+async def test_local_operating_hours_fall_back_to_the_standard_rdm_counter():
+    """A missing manufacturer extension must not hide standard DEVICE_HOURS."""
+    with patch.object(
+        local, "_async_rdm_get", AsyncMock(side_effect=[None, b"\x00\x00\x04\xd2"])
+    ):
+        value = await _async_read_operating_hours(AsyncMock(), 12345, 1, 5.0)
+
+    assert value == 1234
 
 
 async def test_local_socket_scene_read_requires_the_fm_master_reply_shape():

@@ -264,8 +264,36 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         )
 
     async def _async_apply_local_reads(self, inventory: Inventory) -> Inventory:
-        """Prefer confirmed local EGC state without making a local failure fatal."""
-        return _inventory_with_local_states(inventory, await self._async_read_local_states(inventory))
+        """Prefer local EGC state, using cloud runtime reads only as a fallback."""
+        states = await self._async_read_local_states(inventory)
+        inventory = _inventory_with_local_states(inventory, states)
+        return await self._async_apply_cloud_operating_hours(inventory, states)
+
+    async def _async_apply_cloud_operating_hours(
+        self, inventory: Inventory, states: Mapping[str, LocalGatewayState]
+    ) -> Inventory:
+        """Read missing runtime counters through the cloud relay when available."""
+        get_hours = getattr(self.client, "async_get_operating_hours", None)
+        if get_hours is None:
+            return inventory
+        locally_read = {
+            (gateway_id, device.device_number)
+            for gateway_id, state in states.items()
+            for device in (state.egc_devices if isinstance(state, LocalGatewayState) else state)
+            if device.operating_hours is not None
+        }
+        values: dict[tuple[str, int], int] = {}
+        for gateway in inventory.gateways:
+            for device in gateway.devices:
+                if device.device_number is None or (gateway.id, device.device_number) in locally_read:
+                    continue
+                try:
+                    value = await get_hours(gateway.id, device.device_number)
+                except OaseError:
+                    continue
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    values[(gateway.id, device.device_number)] = value
+        return _inventory_with_operating_hours(inventory, values)
 
     async def _async_read_local_states(
         self, inventory: Inventory
@@ -526,6 +554,32 @@ def _device_with_local_state(device: Device, state: LocalEgcDeviceState | None) 
             fc_status=previous.fc_status,
             timestamp=previous.timestamp,
         ),
+        operating_hours=(
+            state.operating_hours if state.operating_hours is not None else device.operating_hours
+        ),
+    )
+
+
+def _inventory_with_operating_hours(
+    inventory: Inventory, values: Mapping[tuple[str, int], int]
+) -> Inventory:
+    """Overlay cloud-relayed runtime counters that could not be read locally."""
+    if not values:
+        return inventory
+    return replace(
+        inventory,
+        gateways=[
+            replace(
+                gateway,
+                devices=[
+                    replace(device, operating_hours=values.get((gateway.id, device.device_number)))
+                    if device.device_number is not None and (gateway.id, device.device_number) in values
+                    else device
+                    for device in gateway.devices
+                ],
+            )
+            for gateway in inventory.gateways
+        ],
     )
 
 

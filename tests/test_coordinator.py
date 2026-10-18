@@ -1,6 +1,7 @@
 """Tests for OASE cloud inventory refreshes."""
 
 import asyncio
+from dataclasses import replace
 from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -19,6 +20,7 @@ from custom_components.oase_control.coordinator import (
     OaseDataUpdateCoordinator,
     _inventory_with_rdm_capabilities,
     _gateway_with_local_state,
+    _inventory_with_operating_hours,
     gateway_firmware_versions_from_inventory,
 )
 from custom_components.oase_control.local import (
@@ -249,6 +251,48 @@ def test_cloud_inventory_retains_gateway_firmware_metadata():
 
     assert versions["gateway-id"].controller == "E52.10"
     assert versions["gateway-id"].wifi_module == "5.1"
+
+
+async def test_operating_hours_fall_back_to_the_cloud_relay(hass):
+    """The cloud fills only a runtime value missing from local RDM reads."""
+    device = Device(
+        id="pump-id",
+        device_number=12345,
+        article_number=75923,
+        device_type="GardenPump",
+        is_connected=True,
+        is_active=True,
+        pump_state=None,
+        has_rdm=True,
+        custom_attributes=None,
+    )
+    gateway = _local_gateway(is_online=True)
+    gateway = replace(gateway, devices=[device])
+    client = AsyncMock()
+    client.async_get_operating_hours.return_value = 1234
+    coordinator = OaseDataUpdateCoordinator(hass, client)
+
+    updated = await coordinator._async_apply_cloud_operating_hours(
+        Inventory(user=None, gateways=[gateway]), {}
+    )
+
+    assert updated.gateways[0].devices[0].operating_hours == 1234
+    client.async_get_operating_hours.assert_awaited_once_with("gateway-id", 12345)
+
+
+def test_operating_hours_overlay_preserves_values_for_other_devices():
+    """A cloud fallback read cannot erase an already known device counter."""
+    first = Device(
+        None, 1, None, "GardenPump", True, True, None, True, None, operating_hours=1
+    )
+    second = Device(None, 2, None, "GardenPump", True, True, None, True, None)
+    gateway = replace(_local_gateway(is_online=True), devices=[first, second])
+
+    updated = _inventory_with_operating_hours(
+        Inventory(user=None, gateways=[gateway]), {("gateway-id", 2): 2}
+    )
+
+    assert [device.operating_hours for device in updated.gateways[0].devices] == [1, 2]
 
 
 def test_local_egc_read_makes_the_matching_gateway_and_pump_available():
