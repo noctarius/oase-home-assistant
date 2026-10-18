@@ -1,9 +1,9 @@
 # Local transport research
 
-The cloud integration and a future local transport share the same `pyoase`
-O-Net frame codec. `custom_components/oase_control/local.py` contains the
-experimental local session setup; it is not exposed in the Home Assistant UI
-yet.
+The cloud integration and local transport share the same `pyoase` O-Net frame
+codec. `custom_components/oase_control/local.py` retains an authenticated local
+session and is used automatically for supported controls; there is no separate
+Home Assistant configuration option.
 
 ## Established facts
 
@@ -37,13 +37,14 @@ after the controller connects. Closing the session returns the lease; the
 listener stops once no session needs it. The session's `async_request()` method is available for controlled,
 read-only O-Net request/reply validation.
 
-## Unresolved before local control
+## Supported local operations
 
-Before adding a local config option or any write path, we need to validate:
+- EGC discovery and supported RDM reads/writes (device on/off and pump power)
+- FM-Master live socket-scene reads (`GET_LIVE_SCENE`)
+- FM-Master socket and dimmer writes (`SET_LIVE_SCENE`), with a matching,
+  affirmative reply required before accepting a write
 
-1. the first local encrypted O-Net request/reply exchange from Home Assistant;
-2. stable key/certificate storage suitable for Home Assistant;
-3. reads for each planned local entity;
-4. writes only after their matching read path works.
-
-Until those are verified, cloud remains the only production transport.
+The local implementation falls back to the cloud relay if a controller cannot
+be reached or rejects the local operation. FM-Master socket operation follows
+the public O-Net codec but still needs verification against an FM-Master in
+this integration's test environment.

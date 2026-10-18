@@ -15,14 +15,14 @@ O-Net frame handling.
 - Dimmable outlet as a brightness light
 - Attached EGC devices' own on/off state
 - Attached EGC pump power as a 0–100% number entity
-- Local-first reads and writes for discovered EGC devices; cloud relay fallback
-  when local communication is unavailable
+- Local-first reads and writes for FM-Master outlets and discovered EGC devices;
+  cloud relay fallback when local communication is unavailable
 
 The initial inventory and local controller credential come from OASE Cloud.
 After setup, the integration discovers the controller on the LAN and uses its
-authenticated reverse-TLS connection for EGC status updates and supported pump
-controls. It falls back to the cloud relay if the local controller cannot be
-reached.
+authenticated reverse-TLS connection for FM-Master outlet state and controls,
+as well as EGC status updates and supported pump controls. It falls back to the
+cloud relay if the local controller cannot be reached.
 
 Local-transport details are tracked in
 [docs/local-transport.md](docs/local-transport.md).

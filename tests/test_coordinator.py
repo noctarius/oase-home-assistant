@@ -12,7 +12,7 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
-from pyoase import Device, Gateway, Inventory, OaseAuthError, OaseConnectionError, rdm
+from pyoase import Device, Gateway, Inventory, OaseAuthError, OaseConnectionError, SocketsState, onet, rdm
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.oase_control.coordinator import (
@@ -20,7 +20,11 @@ from custom_components.oase_control.coordinator import (
     _inventory_with_rdm_capabilities,
     _gateway_with_local_state,
 )
-from custom_components.oase_control.local import LocalEgcDeviceState, OaseLocalTransportError
+from custom_components.oase_control.local import (
+    LocalEgcDeviceState,
+    LocalGatewayState,
+    OaseLocalTransportError,
+)
 
 
 def _local_gateway(gateway_id: str = "gateway-id", *, is_online: bool = False) -> Gateway:
@@ -88,7 +92,7 @@ async def test_local_reads_are_serialized_across_inventory_and_status_updates(ha
     active_reads = 0
     max_active_reads = 0
 
-    async def _read(*_args):
+    async def _read(*_args, **_kwargs):
         nonlocal active_reads, max_active_reads
         active_reads += 1
         max_active_reads = max(max_active_reads, active_reads)
@@ -97,7 +101,7 @@ async def test_local_reads_are_serialized_across_inventory_and_status_updates(ha
         active_reads -= 1
         return ()
 
-    coordinator.local_sessions.async_read_egc_devices = _read
+    coordinator.local_sessions.async_read_gateway_state = _read
     inventory = Inventory(user=None, gateways=[gateway])
     first = hass.async_create_task(coordinator._async_apply_local_reads(inventory))
     await first_read_started.wait()
@@ -135,6 +139,56 @@ async def test_device_write_prefers_the_local_session(hass):
     )
     client.async_set_device_on.assert_not_awaited()
     coordinator.async_refresh_local_state.assert_awaited_once()
+
+
+async def test_fm_master_socket_write_prefers_the_local_session(hass):
+    """A reachable FM-Master handles outlet writes without the cloud relay."""
+    gateway = Gateway(
+        id="gateway-id",
+        serial_number="500000000000",
+        article_number=70788,
+        gateway_type="FmMasterWLanEgcCloudEsp",
+        is_online=True,
+        online_event_time=None,
+        sockets=None,
+    )
+    client = AsyncMock()
+    coordinator = OaseDataUpdateCoordinator(
+        hass, client, local_credentials={"gateway-id": "credential"}
+    )
+    coordinator.data = Inventory(user=None, gateways=[gateway])
+    coordinator.local_sessions.async_set_socket = AsyncMock()
+    coordinator.async_refresh_local_state = AsyncMock()
+
+    await coordinator.async_set_socket("gateway-id", onet.Socket.SOCKET_2, True)
+
+    coordinator.local_sessions.async_set_socket.assert_awaited_once_with(
+        "gateway-id", "500000000000", "credential", onet.Socket.SOCKET_2, onet.ON
+    )
+    client.async_set_socket.assert_not_awaited()
+    coordinator.async_refresh_local_state.assert_awaited_once_with(follow_up=True)
+
+
+def test_local_fm_master_socket_scene_overlays_cloud_socket_state():
+    """A validated local scene becomes the authoritative FM-Master outlet state."""
+    gateway = Gateway(
+        id="gateway-id",
+        serial_number="500000000000",
+        article_number=70788,
+        gateway_type="FmMasterWLanEgcCloudEsp",
+        is_online=False,
+        online_event_time=None,
+        sockets=SocketsState(socket1=False, socket2=False, socket3=False, dimmer_on=False),
+    )
+
+    updated = _gateway_with_local_state(
+        gateway, LocalGatewayState((), onet.SocketState(True, False, True, True, 128))
+    )
+
+    assert updated.is_online is True
+    assert updated.sockets == SocketsState(
+        socket1=True, socket2=False, socket3=True, dimmer_on=True, dimmer_value=128
+    )
 
 
 def test_cached_rdm_data_enables_only_confirmed_pump_controls():
@@ -264,7 +318,7 @@ async def test_local_status_refreshes_do_not_postpone_cloud_polling(hass):
     coordinator = OaseDataUpdateCoordinator(
         hass, client, local_credentials={"gateway-id": "credential"}
     )
-    coordinator.local_sessions.async_read_egc_devices = AsyncMock(return_value=())
+    coordinator.local_sessions.async_read_gateway_state = AsyncMock(return_value=())
     await coordinator.async_refresh()
     unsubscribe = coordinator.async_add_listener(callback(lambda: None))
     coordinator.async_start_local_updates()
@@ -289,11 +343,11 @@ async def test_local_status_refresh_keeps_inventory_updated_during_the_read(hass
     coordinator.data = Inventory(user=None, gateways=[_local_gateway()])
     newer = Inventory(user=None, gateways=[_local_gateway(), _local_gateway("new-gateway")])
 
-    async def _read(*_args):
+    async def _read(*_args, **_kwargs):
         coordinator.data = newer
         return ()
 
-    coordinator.local_sessions.async_read_egc_devices = _read
+    coordinator.local_sessions.async_read_gateway_state = _read
 
     await coordinator.async_refresh_local_state()
 
@@ -310,14 +364,14 @@ async def test_local_write_refresh_runs_after_an_in_flight_read(hass):
     release = asyncio.Event()
     reads = 0
 
-    async def _read(*_args):
+    async def _read(*_args, **_kwargs):
         nonlocal reads
         reads += 1
         if reads == 1:
             await release.wait()
         return ()
 
-    coordinator.local_sessions.async_read_egc_devices = _read
+    coordinator.local_sessions.async_read_gateway_state = _read
     poll = hass.async_create_task(coordinator.async_refresh_local_state())
     await asyncio.sleep(0)
     await coordinator.async_refresh_local_state(follow_up=True)
@@ -343,7 +397,7 @@ def _cloud_down_coordinator(hass, error, **kwargs) -> OaseDataUpdateCoordinator:
 async def test_cloud_and_local_outage_is_reported(hass):
     """The last inventory is not presented as current when nothing answers."""
     coordinator = _cloud_down_coordinator(hass, OaseConnectionError("offline"))
-    coordinator.local_sessions.async_read_egc_devices = AsyncMock(
+    coordinator.local_sessions.async_read_gateway_state = AsyncMock(
         side_effect=OaseLocalTransportError("unreachable")
     )
 
@@ -355,12 +409,12 @@ async def test_cloud_outage_marks_locally_unreachable_gateways_offline(hass):
     """Only gateways that answered locally keep reporting live state."""
     coordinator = _cloud_down_coordinator(hass, OaseConnectionError("offline"))
 
-    async def _read(gateway_id, *_args):
+    async def _read(gateway_id, *_args, **_kwargs):
         if gateway_id == "other":
             raise OaseLocalTransportError("unreachable")
         return ()
 
-    coordinator.local_sessions.async_read_egc_devices = _read
+    coordinator.local_sessions.async_read_gateway_state = _read
 
     inventory = await coordinator._async_update_data()
 
@@ -372,7 +426,7 @@ async def test_expired_cloud_credentials_still_start_reauth_during_local_fallbac
     entry = MockConfigEntry(domain="oase_control", data={})
     entry.add_to_hass(hass)
     coordinator = _cloud_down_coordinator(hass, OaseAuthError("expired"), config_entry=entry)
-    coordinator.local_sessions.async_read_egc_devices = AsyncMock(return_value=())
+    coordinator.local_sessions.async_read_gateway_state = AsyncMock(return_value=())
 
     with patch.object(entry, "async_start_reauth") as start_reauth:
         inventory = await coordinator._async_update_data()

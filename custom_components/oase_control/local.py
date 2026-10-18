@@ -77,6 +77,14 @@ class LocalEgcDeviceState:
     pump_power_raw: bytes | None
 
 
+@dataclass(frozen=True)
+class LocalGatewayState:
+    """State available from one authenticated local controller session."""
+
+    egc_devices: tuple[LocalEgcDeviceState, ...]
+    sockets: onet.SocketState | None = None
+
+
 @dataclass
 class OaseLocalTlsSession:
     """An established controller-to-client TLS connection.
@@ -293,6 +301,22 @@ class OaseLocalSessionManager:
             gateway_id, serial_number, password, async_read_egc_devices
         )
 
+    async def async_read_gateway_state(
+        self,
+        gateway_id: str,
+        serial_number: str,
+        password: str,
+        *,
+        read_sockets: bool,
+    ) -> LocalGatewayState:
+        """Read EGC state and, for an FM-Master, its live socket scene."""
+        return await self._async_with_session(
+            gateway_id,
+            serial_number,
+            password,
+            lambda session: async_read_gateway_state(session, read_sockets=read_sockets),
+        )
+
     async def async_set_egc_parameter(
         self,
         gateway_id: str,
@@ -308,6 +332,38 @@ class OaseLocalSessionManager:
             serial_number,
             password,
             lambda session: async_set_egc_parameter(session, device_number, pid, value),
+        )
+
+    async def async_set_socket(
+        self,
+        gateway_id: str,
+        serial_number: str,
+        password: str,
+        socket: onet.Socket,
+        value: int,
+    ) -> None:
+        """Set one FM-Master socket channel on the retained local session."""
+        await self._async_with_session(
+            gateway_id,
+            serial_number,
+            password,
+            lambda session: async_set_socket(session, socket, value),
+        )
+
+    async def async_set_dimmer(
+        self,
+        gateway_id: str,
+        serial_number: str,
+        password: str,
+        on: bool,
+        brightness: int | None,
+    ) -> None:
+        """Set a dimmer level, then its on/off channel, on one local session."""
+        await self._async_with_session(
+            gateway_id,
+            serial_number,
+            password,
+            lambda session: async_set_dimmer(session, on, brightness),
         )
 
     async def async_close(self) -> None:
@@ -490,6 +546,69 @@ async def async_read_egc_devices(
             )
         )
     return tuple(devices)
+
+
+async def async_read_gateway_state(
+    session: OaseLocalTlsSession, *, read_sockets: bool, timeout: float = 5.0
+) -> LocalGatewayState:
+    """Read all generic EGC state and an FM-Master's socket scene when requested."""
+    egc_devices = await async_read_egc_devices(session, timeout=timeout)
+    sockets = await async_read_socket_state(session, timeout=timeout) if read_sockets else None
+    return LocalGatewayState(egc_devices, sockets)
+
+
+async def async_read_socket_state(
+    session: OaseLocalTlsSession, *, timeout: float = 5.0
+) -> onet.SocketState:
+    """Read and validate the FM-Master's five-byte live socket scene."""
+    reply = await session.async_request(
+        onet.PacketType.GET_LIVE_SCENE, onet.build_socket_get_payload(), timeout=timeout
+    )
+    if reply.packet_type != onet.reply_type(onet.PacketType.GET_LIVE_SCENE):
+        raise OaseLocalTransportError("controller returned an unexpected live-scene reply")
+    try:
+        scene = onet.parse_live_scene_reply(reply.payload)
+        if scene.scene_type != 0x64 or scene.scene_length != 5:
+            raise ValueError("unexpected socket scene format")
+        return onet.parse_socket_state(scene.data)
+    except ValueError as err:
+        raise OaseLocalTransportError("controller returned an invalid socket scene") from err
+
+
+async def async_set_socket(
+    session: OaseLocalTlsSession, socket: onet.Socket, value: int, *, timeout: float = 5.0
+) -> None:
+    """Set one FM-Master socket channel and require an affirmative matching reply."""
+    try:
+        payload = onet.build_socket_set_payload(socket, value)
+    except ValueError as err:
+        raise OaseLocalTransportError("invalid FM-Master socket command") from err
+    reply = await session.async_request(onet.PacketType.SET_LIVE_SCENE, payload, timeout=timeout)
+    if reply.packet_type != onet.reply_type(onet.PacketType.SET_LIVE_SCENE):
+        raise OaseLocalTransportError("controller returned an unexpected socket set reply")
+    try:
+        accepted = onet.parse_set_reply(reply.payload)
+    except ValueError as err:
+        raise OaseLocalTransportError("controller returned an invalid socket set reply") from err
+    if not accepted:
+        raise OaseLocalTransportError("controller rejected the socket set command")
+
+
+async def async_set_dimmer(
+    session: OaseLocalTlsSession,
+    on: bool,
+    brightness: int | None,
+    *,
+    timeout: float = 5.0,
+) -> None:
+    """Set the optional dimmer level before its on/off state."""
+    if brightness is not None:
+        await async_set_socket(
+            session, onet.Socket.DIMMER_VALUE, max(0, min(255, int(brightness))), timeout=timeout
+        )
+    await async_set_socket(
+        session, onet.Socket.DIMMER_ONOFF, onet.ON if on else onet.OFF, timeout=timeout
+    )
 
 
 async def _async_rdm_get(

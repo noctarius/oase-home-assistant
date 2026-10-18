@@ -14,11 +14,12 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers.event import async_track_time_interval
 
-from pyoase import Device, Gateway, Inventory, OaseAuthError, OaseError, PumpState, onet, rdm
+from pyoase import Device, Gateway, Inventory, OaseAuthError, OaseError, PumpState, SocketsState, onet, rdm
 
 from .const import CONF_LOCAL_CREDENTIALS, DOMAIN, LOCAL_UPDATE_INTERVAL, UPDATE_INTERVAL
 from .local import (
     LocalEgcDeviceState,
+    LocalGatewayState,
     OaseLocalTransportError,
     OaseLocalSessionManager,
     local_credentials_from_inventory,
@@ -118,11 +119,17 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         await self._async_cloud_command(self.client.async_set_pump_power(gateway_id, device_number, raw))
 
     async def async_set_socket(self, gateway_id: str, socket: onet.Socket, on: bool) -> None:
-        """Switch an FM-Master outlet through the cloud relay."""
+        """Switch an FM-Master outlet locally when possible, then via cloud."""
+        if await self._async_set_local_socket(gateway_id, socket, onet.ON if on else onet.OFF):
+            await self.async_refresh_local_state(follow_up=True)
+            return
         await self._async_cloud_command(self.client.async_set_socket(gateway_id, socket, on))
 
     async def async_set_dimmer(self, gateway_id: str, on: bool, brightness: int | None = None) -> None:
-        """Set an FM-Master dimmer's level, then its on/off state, through the cloud relay."""
+        """Set an FM-Master dimmer locally when possible, then via cloud."""
+        if await self._async_set_local_dimmer(gateway_id, on, brightness):
+            await self.async_refresh_local_state(follow_up=True)
+            return
 
         async def _async_command() -> None:
             if brightness is not None:
@@ -232,8 +239,8 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
 
     async def _async_read_local_states(
         self, inventory: Inventory
-    ) -> dict[str, tuple[LocalEgcDeviceState, ...]]:
-        """Read every reachable gateway's EGC bus, keyed by gateway id."""
+    ) -> dict[str, LocalGatewayState]:
+        """Read every reachable gateway's local state, keyed by gateway id."""
         await self.local_sessions.async_prune({gateway.id for gateway in inventory.gateways})
         if not self.local_credentials:
             return {}
@@ -241,14 +248,17 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         # controller speaks a request/reply protocol over one TLS stream, so
         # serialise reads to prevent replies being consumed by the wrong caller.
         async with self._local_read_lock:
-            states: dict[str, tuple[LocalEgcDeviceState, ...]] = {}
+            states: dict[str, LocalGatewayState] = {}
             for gateway in inventory.gateways:
                 credential = self.local_credentials.get(gateway.id)
                 if not credential or not gateway.serial_number:
                     continue
                 try:
-                    states[gateway.id] = await self.local_sessions.async_read_egc_devices(
-                        gateway.id, gateway.serial_number, credential
+                    states[gateway.id] = await self.local_sessions.async_read_gateway_state(
+                        gateway.id,
+                        gateway.serial_number,
+                        credential,
+                        read_sockets=gateway.is_fm_master,
                     )
                 except OaseLocalTransportError:
                     continue
@@ -265,6 +275,38 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         try:
             await self.local_sessions.async_set_egc_parameter(
                 gateway_id, gateway.serial_number, credential, device_number, pid, value
+            )
+        except OaseLocalTransportError:
+            return False
+        return True
+
+    async def _async_set_local_socket(
+        self, gateway_id: str, socket: onet.Socket, value: int
+    ) -> bool:
+        """Write a socket locally only on an FM-Master with cached credentials."""
+        gateway = self.data.gateway(gateway_id) if self.data else None
+        credential = self.local_credentials.get(gateway_id)
+        if not gateway or not gateway.is_fm_master or not gateway.serial_number or not credential:
+            return False
+        try:
+            await self.local_sessions.async_set_socket(
+                gateway_id, gateway.serial_number, credential, socket, value
+            )
+        except OaseLocalTransportError:
+            return False
+        return True
+
+    async def _async_set_local_dimmer(
+        self, gateway_id: str, on: bool, brightness: int | None
+    ) -> bool:
+        """Write the dimmer locally only on an FM-Master with cached credentials."""
+        gateway = self.data.gateway(gateway_id) if self.data else None
+        credential = self.local_credentials.get(gateway_id)
+        if not gateway or not gateway.is_fm_master or not gateway.serial_number or not credential:
+            return False
+        try:
+            await self.local_sessions.async_set_dimmer(
+                gateway_id, gateway.serial_number, credential, on, brightness
             )
         except OaseLocalTransportError:
             return False
@@ -340,7 +382,7 @@ def _device_with_rdm_capabilities(device: Device, raw_device: Any) -> Device:
 
 
 def _inventory_with_local_states(
-    inventory: Inventory, states: Mapping[str, tuple[LocalEgcDeviceState, ...]]
+    inventory: Inventory, states: Mapping[str, LocalGatewayState]
 ) -> Inventory:
     """Overlay local reads on the gateways they were read from."""
     if not states:
@@ -355,13 +397,27 @@ def _inventory_with_local_states(
 
 
 def _gateway_with_local_state(
-    gateway: Gateway, states: tuple[LocalEgcDeviceState, ...]
+    gateway: Gateway, state: LocalGatewayState | tuple[LocalEgcDeviceState, ...]
 ) -> Gateway:
     """Overlay confirmed local EGC reads on a cloud inventory gateway."""
-    by_device_number = {state.device_number: state for state in states}
+    if isinstance(state, tuple):
+        state = LocalGatewayState(state)
+    by_device_number = {item.device_number: item for item in state.egc_devices}
+    sockets = (
+        SocketsState(
+            socket1=state.sockets.socket1,
+            socket2=state.sockets.socket2,
+            socket3=state.sockets.socket3,
+            dimmer_on=state.sockets.dimmer_on,
+            dimmer_value=state.sockets.dimmer_value,
+        )
+        if state.sockets is not None
+        else gateway.sockets
+    )
     return replace(
         gateway,
         is_online=True,
+        sockets=sockets,
         devices=[
             _device_with_local_state(device, by_device_number.get(device.device_number))
             for device in gateway.devices

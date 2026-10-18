@@ -24,9 +24,12 @@ from custom_components.oase_control.local import (
     _local_network,
     _parse_discovery_result,
     async_discover_controllers,
+    async_read_socket_state,
     async_open_tls_session,
     async_read_egc_devices,
+    async_set_dimmer,
     async_set_egc_parameter,
+    async_set_socket,
     device_info_probe_packet,
     local_credential_from_inventory,
     local_credentials_from_inventory,
@@ -152,6 +155,60 @@ async def test_local_rdm_set_writes_the_requested_parameter_and_requires_an_ack(
     assert request.command_class == rdm.CommandClass.SET_COMMAND
     assert request.pid == rdm.Pid.DEVICE_ON
     assert request.data == b"\xff"
+
+
+async def test_local_socket_scene_read_requires_the_fm_master_reply_shape():
+    """A local FM-Master read decodes all four outlets only from a live scene."""
+    payload = b"\x01" + (0).to_bytes(4, "little") + (1).to_bytes(4, "little") + bytes(
+        [0x64, 5, 0xFF, 0x00, 0xFF, 0xFF, 0x80]
+    )
+    session = OaseLocalTlsSession(AsyncMock(), AsyncMock(), AsyncMock())
+    session.async_request = AsyncMock(
+        return_value=onet.OnetPacket(onet.reply_type(onet.PacketType.GET_LIVE_SCENE), payload)
+    )
+
+    state = await async_read_socket_state(session)
+
+    assert state == onet.SocketState(True, False, True, True, 128)
+    session.async_request.assert_awaited_once_with(
+        onet.PacketType.GET_LIVE_SCENE, onet.build_socket_get_payload(), timeout=5.0
+    )
+
+
+@pytest.mark.parametrize(
+    ("packet_type", "payload", "message"),
+    [
+        (onet.PacketType.ALIVE, b"\x01", "unexpected"),
+        (onet.reply_type(onet.PacketType.SET_LIVE_SCENE), b"", "invalid"),
+        (onet.reply_type(onet.PacketType.SET_LIVE_SCENE), b"\x00", "rejected"),
+    ],
+)
+async def test_local_socket_write_rejects_nonaffirmative_replies(packet_type, payload, message):
+    """Only a matching affirmative SET_LIVE_SCENE reply completes a local write."""
+    session = OaseLocalTlsSession(AsyncMock(), AsyncMock(), AsyncMock())
+    session.async_request = AsyncMock(return_value=onet.OnetPacket(packet_type, payload))
+
+    with pytest.raises(OaseLocalTransportError, match=message):
+        await async_set_socket(session, onet.Socket.SOCKET_2, onet.ON)
+
+
+async def test_local_dimmer_write_sets_level_before_the_onoff_channel():
+    """The app's dimmer ordering is retained over the local TLS session."""
+    session = OaseLocalTlsSession(AsyncMock(), AsyncMock(), AsyncMock())
+    session.async_request = AsyncMock(
+        return_value=onet.OnetPacket(onet.reply_type(onet.PacketType.SET_LIVE_SCENE), b"\x01")
+    )
+
+    await async_set_dimmer(session, True, 128)
+
+    assert session.async_request.await_args_list[0].args == (
+        onet.PacketType.SET_LIVE_SCENE,
+        onet.build_socket_set_payload(onet.Socket.DIMMER_VALUE, 128),
+    )
+    assert session.async_request.await_args_list[1].args == (
+        onet.PacketType.SET_LIVE_SCENE,
+        onet.build_socket_set_payload(onet.Socket.DIMMER_ONOFF, onet.ON),
+    )
 
 
 async def test_closed_session_manager_cannot_open_a_new_connection():
