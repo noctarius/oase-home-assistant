@@ -24,6 +24,11 @@ async def async_setup_entry(
             OaseGatewayWifiFirmwareVersion(entry.runtime_data, gateway.id),
             OaseGatewayWifiNetwork(entry.runtime_data, gateway.id),
             *(
+                OaseOecNetworkId(entry.runtime_data, gateway.id, device)
+                for device in gateway.devices
+                if device.device_number is not None
+            ),
+            *(
                 OaseOperatingHours(entry.runtime_data, gateway.id, device)
                 for device in gateway.devices
                 if device.device_number is not None
@@ -114,3 +119,20 @@ class OaseOperatingHours(OaseDeviceEntity, SensorEntity):
     def native_value(self) -> int | None:
         device = self.device
         return device.operating_hours if device else None
+
+
+class OaseOecNetworkId(OaseDeviceEntity, SensorEntity):
+    """Report the OASE Easy Control identifier of an EGC device."""
+
+    _attr_name = "OEC network ID"
+    _attr_icon = "mdi:identifier"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, gateway_id: str, device) -> None:
+        super().__init__(coordinator, gateway_id, device)
+        self._attr_unique_id = f"{gateway_id}_device_{device.device_number}_oec_network_id"
+
+    @property
+    def native_value(self) -> int | None:
+        device = self.device
+        return device.device_number if device else None

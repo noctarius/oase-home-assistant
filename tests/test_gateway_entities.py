@@ -23,6 +23,7 @@ from custom_components.oase_control.sensor import (
     OaseGatewayFirmwareVersion,
     OaseGatewayWifiNetwork,
     OaseGatewayWifiFirmwareVersion,
+    OaseOecNetworkId,
     OaseOperatingHours,
 )
 from custom_components.oase_control.switch import (
@@ -172,6 +173,29 @@ async def test_operating_hours_sensor_uses_the_local_or_cloud_value(hass):
     assert sensor.native_value == 1234
     assert sensor.entity_category == "diagnostic"
     assert sensor.device_info["via_device"] == ("oase_control", "gateway-id")
+
+
+async def test_egc_device_reports_its_oec_network_id(hass):
+    """The EGC device number is labelled as OEC network ID, not a serial."""
+    device = Device(
+        id="pump-id",
+        device_number=12345,
+        article_number=75923,
+        device_type="GardenPump",
+        is_connected=True,
+        is_active=True,
+        pump_state=None,
+        has_rdm=True,
+        custom_attributes=None,
+    )
+    coordinator = OaseDataUpdateCoordinator(hass, AsyncMock())
+    coordinator.data = Inventory(user=None, gateways=[_fm_master(device)])
+
+    sensor = OaseOecNetworkId(coordinator, "gateway-id", device)
+
+    assert sensor.native_value == 12345
+    assert sensor.name == "OEC network ID"
+    assert sensor.entity_category == "diagnostic"
 
 
 async def test_gateway_uses_the_cloud_assigned_controller_name(hass):
