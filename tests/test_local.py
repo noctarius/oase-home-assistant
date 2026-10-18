@@ -21,6 +21,7 @@ from custom_components.oase_control.local import (
     OaseLocalTlsSession,
     OaseLocalTransportError,
     _async_read_operating_hours,
+    _parse_wifi_rssi,
     _parse_wifi_network,
     _create_server_tls_context,
     _local_network,
@@ -30,6 +31,7 @@ from custom_components.oase_control.local import (
     async_read_cloud_connection_enabled,
     async_read_socket_state,
     async_read_wifi_network,
+    async_read_wifi_rssi,
     async_open_tls_session,
     async_read_egc_devices,
     async_set_dimmer,
@@ -281,6 +283,33 @@ def test_local_wifi_network_parser_rejects_truncated_or_invalid_text():
         _parse_wifi_network(b"\0" * 65)
     with pytest.raises(OaseLocalTransportError, match="invalid"):
         _parse_wifi_network(b"\0" * 34 + b"\xff" + b"\0" * 31)
+
+
+async def test_local_wifi_rssi_read_decodes_the_signed_alive_field():
+    """Modern ALIVE replies expose the controller's Wi-Fi RSSI at byte 32."""
+    payload = bytearray(37)
+    payload[32] = 0xC4  # -60 dBm
+    payload[33] = 1
+    session = OaseLocalTlsSession(AsyncMock(), AsyncMock(), AsyncMock())
+    session.async_request = AsyncMock(
+        return_value=onet.OnetPacket(onet.reply_type(onet.PacketType.ALIVE), bytes(payload))
+    )
+
+    assert await async_read_wifi_rssi(session) == -60
+    session.async_request.assert_awaited_once_with(onet.PacketType.ALIVE, timeout=5.0)
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [(b"\0" * 33, None), (b"\0" * 32, "truncated"), (b"\0" * 33 + b"\x01", "invalid")],
+)
+def test_local_wifi_rssi_parser_handles_legacy_and_rejects_invalid_alive_records(payload, expected):
+    """Only complete modern ALIVE records may provide a Wi-Fi RSSI value."""
+    if expected is None:
+        assert _parse_wifi_rssi(payload) is None
+    else:
+        with pytest.raises(OaseLocalTransportError, match=expected):
+            _parse_wifi_rssi(payload)
 
 
 @pytest.mark.parametrize(

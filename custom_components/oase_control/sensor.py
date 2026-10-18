@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
-from homeassistant.const import EntityCategory, UnitOfTime
+from homeassistant.const import EntityCategory, SIGNAL_STRENGTH_DECIBELS_MILLIWATT, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -23,6 +23,8 @@ async def async_setup_entry(
             OaseGatewayFirmwareVersion(entry.runtime_data, gateway.id),
             OaseGatewayWifiFirmwareVersion(entry.runtime_data, gateway.id),
             OaseGatewayWifiNetwork(entry.runtime_data, gateway.id),
+            OaseGatewayWifiSignalStrength(entry.runtime_data, gateway.id),
+            OaseGatewayWifiSignalQuality(entry.runtime_data, gateway.id),
             *(
                 OaseOecNetworkId(entry.runtime_data, gateway.id, device)
                 for device in gateway.devices
@@ -100,6 +102,47 @@ class OaseGatewayWifiNetwork(OaseEntity, SensorEntity):
     @property
     def native_value(self) -> str | None:
         return self.coordinator.local_wifi_networks.get(self.gateway_id)
+
+
+class OaseGatewayWifiSignalStrength(OaseEntity, SensorEntity):
+    """Report the controller Wi-Fi RSSI supplied by its local ALIVE reply."""
+
+    _attr_name = "Wi-Fi signal strength"
+    _attr_device_class = SensorDeviceClass.SIGNAL_STRENGTH
+    _attr_native_unit_of_measurement = SIGNAL_STRENGTH_DECIBELS_MILLIWATT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:wifi"
+
+    def __init__(self, coordinator, gateway_id: str) -> None:
+        super().__init__(coordinator, gateway_id)
+        self._attr_unique_id = f"{gateway_id}_wifi_signal_strength"
+
+    @property
+    def native_value(self) -> int | None:
+        return self.coordinator.local_wifi_rssi.get(self.gateway_id)
+
+
+class OaseGatewayWifiSignalQuality(OaseEntity, SensorEntity):
+    """Report the app-compatible coarse Wi-Fi signal label."""
+
+    _attr_name = "Wi-Fi signal quality"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:wifi"
+
+    def __init__(self, coordinator, gateway_id: str) -> None:
+        super().__init__(coordinator, gateway_id)
+        self._attr_unique_id = f"{gateway_id}_wifi_signal_quality"
+
+    @property
+    def native_value(self) -> str | None:
+        rssi = self.coordinator.local_wifi_rssi.get(self.gateway_id)
+        if rssi is None:
+            return None
+        if rssi <= -80:
+            return "Weak"
+        if rssi > -60:
+            return "Strong"
+        return "Medium"
 
 
 class OaseOperatingHours(OaseDeviceEntity, SensorEntity):

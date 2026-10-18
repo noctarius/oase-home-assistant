@@ -63,6 +63,7 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         self.local_sessions = OaseLocalSessionManager()
         self.local_cloud_connection_enabled: dict[str, bool] = {}
         self.local_wifi_networks: dict[str, str] = {}
+        self.local_wifi_rssi: dict[str, int] = {}
         self.gateway_firmware_versions: dict[str, GatewayFirmwareVersions] = {}
         self.gateway_names: dict[str, str] = {}
         self._cancel_local_updates = None
@@ -113,6 +114,11 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
                         gateway_id: state.wifi_network
                         for gateway_id, state in states.items()
                         if isinstance(state, LocalGatewayState) and state.wifi_network is not None
+                    }
+                    self.local_wifi_rssi = {
+                        gateway_id: state.wifi_rssi
+                        for gateway_id, state in states.items()
+                        if isinstance(state, LocalGatewayState) and state.wifi_rssi is not None
                     }
                     # Overlay onto the current inventory rather than the one the
                     # read started from: a cloud refresh may have completed in
@@ -183,6 +189,7 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         await self.local_sessions.async_close()
         self.local_cloud_connection_enabled.clear()
         self.local_wifi_networks.clear()
+        self.local_wifi_rssi.clear()
         self.gateway_firmware_versions.clear()
         self.gateway_names.clear()
 
@@ -332,6 +339,11 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         self.local_wifi_networks = {
             gateway_id: network
             for gateway_id, network in self.local_wifi_networks.items()
+            if gateway_id in valid_gateway_ids
+        }
+        self.local_wifi_rssi = {
+            gateway_id: rssi
+            for gateway_id, rssi in self.local_wifi_rssi.items()
             if gateway_id in valid_gateway_ids
         }
         if not self.local_credentials:

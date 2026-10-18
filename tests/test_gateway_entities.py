@@ -22,6 +22,8 @@ from custom_components.oase_control.light import async_setup_entry as async_setu
 from custom_components.oase_control.sensor import (
     OaseGatewayFirmwareVersion,
     OaseGatewayWifiNetwork,
+    OaseGatewayWifiSignalQuality,
+    OaseGatewayWifiSignalStrength,
     OaseGatewayWifiFirmwareVersion,
     OaseOecNetworkId,
     OaseOperatingHours,
@@ -149,6 +151,20 @@ async def test_gateway_wifi_network_sensor_reports_the_local_ssid(hass):
 
     assert network.native_value == "Pond network"
     assert network.entity_category == "diagnostic"
+
+
+async def test_gateway_wifi_signal_sensors_report_the_local_alive_rssi(hass):
+    """RSSI is a local diagnostic value, with the app's coarse label."""
+    coordinator = OaseDataUpdateCoordinator(hass, AsyncMock())
+    coordinator.data = Inventory(user=None, gateways=[_fm_master()])
+    coordinator.local_wifi_rssi["gateway-id"] = -67
+
+    strength = OaseGatewayWifiSignalStrength(coordinator, "gateway-id")
+    quality = OaseGatewayWifiSignalQuality(coordinator, "gateway-id")
+
+    assert strength.native_value == -67
+    assert strength.native_unit_of_measurement == "dBm"
+    assert quality.native_value == "Medium"
 
 
 async def test_operating_hours_sensor_uses_the_local_or_cloud_value(hass):

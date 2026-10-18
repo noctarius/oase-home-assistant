@@ -107,6 +107,7 @@ class LocalGatewayState:
     sockets: onet.SocketState | None = None
     cloud_connection_enabled: bool | None = None
     wifi_network: str | None = None
+    wifi_rssi: int | None = None
 
 
 @dataclass
@@ -660,7 +661,8 @@ async def async_read_gateway_state(
     sockets = await async_read_socket_state(session, timeout=timeout) if read_sockets else None
     cloud_connection_enabled = await async_read_cloud_connection_enabled(session, timeout=timeout)
     wifi_network = await async_read_wifi_network(session, timeout=timeout)
-    return LocalGatewayState(egc_devices, sockets, cloud_connection_enabled, wifi_network)
+    wifi_rssi = await async_read_wifi_rssi(session, timeout=timeout)
+    return LocalGatewayState(egc_devices, sockets, cloud_connection_enabled, wifi_network, wifi_rssi)
 
 
 async def async_read_cloud_connection_enabled(
@@ -695,6 +697,33 @@ async def async_read_wifi_network(
     if reply.packet_type != _NETWORK_CONFIG_REPLY:
         raise OaseLocalTransportError("controller returned an unexpected network-config reply")
     return _parse_wifi_network(reply.payload)
+
+
+async def async_read_wifi_rssi(
+    session: OaseLocalTlsSession, *, timeout: float = 5.0
+) -> int | None:
+    """Read the controller Wi-Fi RSSI from a modern ALIVE reply.
+
+    Older controllers send a 33-byte ALIVE payload which predates the RSSI
+    field.  It is valid, but deliberately produces no signal-strength value.
+    """
+    reply = await session.async_request(onet.PacketType.ALIVE, timeout=timeout)
+    if reply.packet_type != onet.reply_type(onet.PacketType.ALIVE):
+        raise OaseLocalTransportError("controller returned an unexpected alive reply")
+    return _parse_wifi_rssi(reply.payload)
+
+
+def _parse_wifi_rssi(payload: bytes) -> int | None:
+    """Decode the signed RSSI byte at offset 32 of an ALIVE payload."""
+    if len(payload) == 33:
+        return None
+    if len(payload) < 34:
+        raise OaseLocalTransportError("controller returned a truncated alive reply")
+    increment_count = payload[33]
+    expected_length = 34 + increment_count * 3
+    if len(payload) != expected_length:
+        raise OaseLocalTransportError("controller returned an invalid alive reply")
+    return struct.unpack_from("<b", payload, 32)[0]
 
 
 def _parse_wifi_network(payload: bytes) -> str | None:
