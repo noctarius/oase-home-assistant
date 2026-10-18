@@ -121,6 +121,65 @@ class OaseLocalTlsSession:
     writer: asyncio.StreamWriter
     listener: _ReverseTlsListener
     _closed: bool = field(default=False, init=False, repr=False)
+    _reader_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    _pending_replies: dict[tuple[int, int], asyncio.Future[onet.OnetPacket]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _packet_listeners: list[Callable[[onet.OnetPacket], None]] = field(
+        default_factory=list, init=False, repr=False
+    )
+
+    def async_add_packet_listener(self, listener: Callable[[onet.OnetPacket], None]) -> Callable[[], None]:
+        """Receive unsolicited controller packets without consuming command replies.
+
+        The returned callback removes the listener. Packet consumers must return
+        promptly; controller I/O remains owned by the session reader task.
+        """
+        self._packet_listeners.append(listener)
+
+        def _remove() -> None:
+            if listener in self._packet_listeners:
+                self._packet_listeners.remove(listener)
+
+        return _remove
+
+    def _ensure_reader(self) -> None:
+        """Start the one reader that owns this TLS stream."""
+        if self._reader_task is None:
+            self._reader_task = asyncio.create_task(self._async_read_packets())
+
+    async def _async_read_packets(self) -> None:
+        """Route replies to commands and expose all other frames as updates."""
+        try:
+            while True:
+                header = await self.reader.readexactly(16)
+                payload_length = struct.unpack_from("<I", header, 4)[0]
+                if payload_length > _MAX_PAYLOAD_LENGTH:
+                    raise OaseLocalTransportError(
+                        "controller reply exceeds the maximum O-Net payload size"
+                    )
+                packet = onet.parse_packet(header + await self.reader.readexactly(payload_length))
+                pending = self._pending_replies.get((packet.packet_type, packet.transaction_number))
+                if pending is not None and not pending.done():
+                    pending.set_result(packet)
+                    continue
+                for listener in tuple(self._packet_listeners):
+                    try:
+                        listener(packet)
+                    except Exception:  # A diagnostic listener must not break I/O.
+                        _LOGGER.exception("OASE local packet listener failed")
+        except asyncio.CancelledError:
+            raise
+        except (ConnectionError, OSError, asyncio.IncompleteReadError, ValueError) as err:
+            self._async_fail_pending(OaseLocalTransportError("local controller stream failed"))
+        except OaseLocalTransportError as err:
+            self._async_fail_pending(err)
+
+    def _async_fail_pending(self, error: OaseLocalTransportError) -> None:
+        """Fail every command waiting on a stream that can no longer be trusted."""
+        for pending in self._pending_replies.values():
+            if not pending.done():
+                pending.set_exception(error)
 
     async def async_request(
         self,
@@ -130,15 +189,21 @@ class OaseLocalTlsSession:
         transaction_number: int = 0,
         timeout: float = 5.0,
     ) -> onet.OnetPacket:
-        """Send one O-Net request through TLS and return its complete reply."""
+        """Send one O-Net request through TLS and return its matching reply."""
+        if self._closed:
+            raise OaseLocalTransportError("local TLS session is closed")
+        self._ensure_reader()
+        expected = (onet.reply_type(packet_type), transaction_number)
+        if expected in self._pending_replies:
+            raise OaseLocalTransportError("duplicate local request transaction")
+        pending = asyncio.get_running_loop().create_future()
+        self._pending_replies[expected] = pending
         self.writer.write(onet.encode_packet(packet_type, payload, transaction_number))
-        await asyncio.wait_for(self.writer.drain(), timeout)
-        header = await asyncio.wait_for(self.reader.readexactly(16), timeout)
-        payload_length = struct.unpack_from("<I", header, 4)[0]
-        if payload_length > _MAX_PAYLOAD_LENGTH:
-            raise OaseLocalTransportError("controller reply exceeds the maximum O-Net payload size")
-        body = await asyncio.wait_for(self.reader.readexactly(payload_length), timeout)
-        return onet.parse_packet(header + body)
+        try:
+            await asyncio.wait_for(self.writer.drain(), timeout)
+            return await asyncio.wait_for(pending, timeout)
+        finally:
+            self._pending_replies.pop(expected, None)
 
     async def async_authenticate(self, password: str, *, timeout: float = 5.0) -> None:
         """Authenticate this local TLS session with its controller password.
@@ -176,6 +241,11 @@ class OaseLocalTlsSession:
             return
         self._closed = True
         try:
+            self._async_fail_pending(OaseLocalTransportError("local TLS session closed"))
+            if self._reader_task is not None:
+                self._reader_task.cancel()
+                await asyncio.gather(self._reader_task, return_exceptions=True)
+                self._reader_task = None
             if abort:
                 self.writer.transport.abort()
                 return

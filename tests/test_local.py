@@ -619,6 +619,34 @@ async def test_oversized_reply_header_is_rejected():
     reader.readexactly.assert_awaited_once_with(16)
 
 
+async def test_session_reader_routes_replies_without_consuming_unsolicited_packets():
+    """A future subscription update cannot be mistaken for a command reply."""
+    update = onet.encode_packet(0x77FF, b"update", transaction_number=9)
+    reply = onet.encode_packet(onet.reply_type(onet.PacketType.ALIVE), b"reply")
+    reader = AsyncMock()
+    reader.readexactly.side_effect = [
+        update[:16],
+        update[16:],
+        reply[:16],
+        reply[16:],
+    ]
+    writer = MagicMock()
+    writer.drain = AsyncMock()
+    writer.wait_closed = AsyncMock()
+    listener = MagicMock()
+    received = []
+    session = OaseLocalTlsSession(reader, writer, listener)
+    session.async_add_packet_listener(received.append)
+
+    result = await session.async_request(onet.PacketType.ALIVE)
+
+    assert result.packet_type == onet.reply_type(onet.PacketType.ALIVE)
+    assert result.payload == b"reply"
+    assert received == [onet.OnetPacket(0x77FF, b"update", transaction_number=9)]
+    await session.async_close()
+    listener.release.assert_called_once()
+
+
 async def test_session_close_aborts_a_controller_that_never_completes_tls_shutdown():
     """A vanished controller cannot hold the gateway lock for the TLS timeout."""
     never = asyncio.get_running_loop().create_future()
