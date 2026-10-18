@@ -185,6 +185,7 @@ async def test_local_egc_read_prefers_the_manufacturer_operating_hours_counter()
             response(rdm.Pid.DEVICE_ON, b"\xff"),
             response(rdm.Pid.PUMP_POWER, b"\x80"),
             response(rdm.Pid.OPERATING_HOURS, (1234).to_bytes(4, "big")),
+            response(rdm.Pid.DEVICE_MODEL_DESCRIPTION, b"AQUAMAX 5000\0"),
         ]
     )
 
@@ -203,7 +204,8 @@ async def test_local_egc_read_prefers_the_manufacturer_operating_hours_counter()
         devices = await async_read_egc_devices(session)
 
     assert devices[0].operating_hours == 1234
-    hour_request = rdm.parse_frame(session.async_request.await_args_list[-1].args[1])
+    assert devices[0].model_description == "AQUAMAX 5000"
+    hour_request = rdm.parse_frame(session.async_request.await_args_list[-2].args[1])
     assert hour_request.pid == rdm.Pid.OPERATING_HOURS
 
 

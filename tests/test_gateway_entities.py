@@ -161,6 +161,17 @@ async def test_operating_hours_sensor_uses_the_local_or_cloud_value(hass):
     assert sensor.device_info["via_device"] == ("oase_control", "gateway-id")
 
 
+async def test_gateway_uses_the_cloud_assigned_controller_name(hass):
+    """A user-assigned controller name wins over the generic product type."""
+    coordinator = OaseDataUpdateCoordinator(hass, AsyncMock())
+    coordinator.data = Inventory(user=None, gateways=[_fm_master()])
+    coordinator.gateway_names["gateway-id"] = "Bachlauf"
+
+    entity = OaseGatewayCloudConnection(coordinator, "gateway-id")
+
+    assert entity.device_info["name"] == "Bachlauf"
+
+
 def _fm_master(*devices: Device) -> Gateway:
     return Gateway(
         id="gateway-id",

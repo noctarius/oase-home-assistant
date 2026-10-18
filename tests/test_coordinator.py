@@ -22,6 +22,7 @@ from custom_components.oase_control.coordinator import (
     _gateway_with_local_state,
     _inventory_with_operating_hours,
     gateway_firmware_versions_from_inventory,
+    gateway_names_from_inventory,
 )
 from custom_components.oase_control.local import (
     LocalEgcDeviceState,
@@ -253,6 +254,22 @@ def test_cloud_inventory_retains_gateway_firmware_metadata():
     assert versions["gateway-id"].wifi_module == "5.1"
 
 
+def test_cloud_inventory_retains_the_user_assigned_controller_name():
+    """The user name is a cloud custom attribute, not a local discovery field."""
+    names = gateway_names_from_inventory(
+        {
+            "gateways": [
+                {
+                    "id": "gateway-id",
+                    "customAttributesJson": '[{"Id": 103, "Value": {"Value": "Bachlauf"}}]',
+                }
+            ]
+        }
+    )
+
+    assert names == {"gateway-id": "Bachlauf"}
+
+
 async def test_operating_hours_fall_back_to_the_cloud_relay(hass):
     """The cloud fills only a runtime value missing from local RDM reads."""
     device = Device(
@@ -339,6 +356,29 @@ def test_local_egc_read_makes_the_matching_gateway_and_pump_available():
     assert updated.devices[0].can_set_power is True
     assert updated.devices[0].pump_state.device_on is True
     assert updated.devices[0].pump_state.dimmer_value == 1
+
+
+def test_local_model_description_supersedes_the_cloud_product_name():
+    """A local RDM model label is preferred while cloud remains the fallback."""
+    device = Device(
+        None,
+        12345,
+        None,
+        "GardenPump",
+        True,
+        True,
+        None,
+        True,
+        None,
+        product_name="Cloud product",
+    )
+    gateway = replace(_local_gateway(is_online=True), devices=[device])
+
+    updated = _gateway_with_local_state(
+        gateway, (LocalEgcDeviceState(1, 12345, 1, 0, None, None, model_description="AQUAMAX 5000"),)
+    )
+
+    assert updated.devices[0].product_name == "AQUAMAX 5000"
 
 
 def test_local_egc_device_state_two_means_off():

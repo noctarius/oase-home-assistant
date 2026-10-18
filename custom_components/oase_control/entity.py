@@ -28,9 +28,12 @@ class OaseEntity(CoordinatorEntity[OaseDataUpdateCoordinator]):
         gateway = self.gateway
         serial = gateway.serial_number if gateway and gateway.serial_number else self.gateway_id
         name = (
-            gateway.info.long_name
-            if gateway and gateway.info
-            else (gateway.gateway_type if gateway else "OASE gateway")
+            self.coordinator.gateway_names.get(self.gateway_id)
+            or (
+                gateway.info.long_name
+                if gateway and gateway.info
+                else (gateway.gateway_type if gateway else "OASE gateway")
+            )
         )
         info = DeviceInfo(
             identifiers={("oase_control", self.gateway_id)},

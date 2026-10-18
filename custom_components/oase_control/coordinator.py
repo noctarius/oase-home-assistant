@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from dataclasses import dataclass, replace
+import json
 import logging
 from typing import Any, Awaitable, Mapping
 
@@ -28,6 +29,7 @@ from .transport import OaseTransport
 
 _LOGGER = logging.getLogger(__name__)
 _RDM_DEVICE_ON = 0xFF
+_CONTROLLER_NAME_ATTRIBUTE_ID = 103
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,7 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         self.local_sessions = OaseLocalSessionManager()
         self.local_cloud_connection_enabled: dict[str, bool] = {}
         self.gateway_firmware_versions: dict[str, GatewayFirmwareVersions] = {}
+        self.gateway_names: dict[str, str] = {}
         self._cancel_local_updates = None
         self._initial_local_update_task: asyncio.Task[None] | None = None
         self._local_read_lock = asyncio.Lock()
@@ -174,6 +177,7 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         await self.local_sessions.async_close()
         self.local_cloud_connection_enabled.clear()
         self.gateway_firmware_versions.clear()
+        self.gateway_names.clear()
 
     async def _async_update_data(self) -> Inventory:
         try:
@@ -182,6 +186,7 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
                 inventory = _inventory_with_rdm_capabilities(Inventory.from_dict(raw_inventory), raw_inventory)
                 self._async_update_local_credentials(raw_inventory, inventory)
                 self._async_update_gateway_firmware_versions(raw_inventory, inventory)
+                self._async_update_gateway_names(raw_inventory, inventory)
             else:
                 inventory = await self.client.async_get_inventory()
         except OaseAuthError as err:
@@ -231,6 +236,17 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         gateway_ids = {gateway.id for gateway in inventory.gateways}
         self.gateway_firmware_versions = {
             gateway_id: version for gateway_id, version in versions.items() if gateway_id in gateway_ids
+        }
+
+    @callback
+    def _async_update_gateway_names(
+        self, raw_inventory: Mapping[str, Any], inventory: Inventory
+    ) -> None:
+        """Keep user-assigned cloud controller names aligned with the inventory."""
+        names = gateway_names_from_inventory(raw_inventory)
+        gateway_ids = {gateway.id for gateway in inventory.gateways}
+        self.gateway_names = {
+            gateway_id: name for gateway_id, name in names.items() if gateway_id in gateway_ids
         }
 
     async def _async_get_raw_inventory(self) -> dict[str, Any] | None:
@@ -415,6 +431,33 @@ def gateway_firmware_versions_from_inventory(
     return versions
 
 
+def gateway_names_from_inventory(raw_inventory: Mapping[str, Any]) -> dict[str, str]:
+    """Extract user-assigned controller names retained in cloud custom attributes."""
+    raw_gateways = raw_inventory.get("gateways")
+    if not isinstance(raw_gateways, list):
+        return {}
+    names: dict[str, str] = {}
+    for gateway in raw_gateways:
+        if not isinstance(gateway, Mapping) or not isinstance(gateway.get("id"), str):
+            continue
+        attributes = gateway.get("customAttributesJson")
+        try:
+            parsed = json.loads(attributes) if isinstance(attributes, str) else attributes
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, list):
+            continue
+        for attribute in parsed:
+            if not isinstance(attribute, Mapping) or attribute.get("Id") != _CONTROLLER_NAME_ATTRIBUTE_ID:
+                continue
+            value = attribute.get("Value")
+            name = value.get("Value") if isinstance(value, Mapping) else None
+            if isinstance(name, str) and (name := name.strip()):
+                names[gateway["id"]] = name
+            break
+    return names
+
+
 def _format_controller_firmware(record: Any) -> str | None:
     """Format the numeric controller version carried by the cloud inventory."""
     value = record.get("value") if isinstance(record, Mapping) else None
@@ -557,6 +600,7 @@ def _device_with_local_state(device: Device, state: LocalEgcDeviceState | None) 
         operating_hours=(
             state.operating_hours if state.operating_hours is not None else device.operating_hours
         ),
+        product_name=state.model_description or device.product_name,
     )
 
 

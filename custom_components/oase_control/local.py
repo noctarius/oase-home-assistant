@@ -82,6 +82,7 @@ class LocalEgcDeviceState:
     device_on_raw: bytes | None
     pump_power_raw: bytes | None
     operating_hours: int | None = None
+    model_description: str | None = None
 
 
 @dataclass(frozen=True)
@@ -562,6 +563,13 @@ async def async_read_egc_devices(
                 operating_hours=await _async_read_operating_hours(
                     session, device.device_number, transaction_number, timeout
                 ),
+                model_description=await _async_rdm_text(
+                    session,
+                    device.device_number,
+                    rdm.Pid.DEVICE_MODEL_DESCRIPTION,
+                    transaction_number,
+                    timeout,
+                ),
             )
         )
     return tuple(devices)
@@ -692,6 +700,21 @@ async def _async_read_operating_hours(
         if data is not None and len(data) >= 4:
             return int.from_bytes(data[:4], "big")
     return None
+
+
+async def _async_rdm_text(
+    session: OaseLocalTlsSession,
+    device_number: int,
+    pid: int,
+    transaction_number: int,
+    timeout: float,
+) -> str | None:
+    """Read one NUL-terminated RDM text field without accepting invalid bytes."""
+    data = await _async_rdm_get(session, device_number, pid, transaction_number, timeout)
+    if data is None:
+        return None
+    text = data.split(b"\0", 1)[0].decode("ascii", "replace").strip()
+    return text or None
 
 
 async def async_set_egc_parameter(
