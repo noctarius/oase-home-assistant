@@ -9,13 +9,20 @@ from homeassistant.helpers import entity_registry as er
 
 from pyoase import Device, Gateway, Inventory, OaseConnectionError, onet
 
-from custom_components.oase_control.coordinator import OaseDataUpdateCoordinator
+from custom_components.oase_control.coordinator import (
+    GatewayFirmwareVersions,
+    OaseDataUpdateCoordinator,
+)
 
 from custom_components.oase_control.binary_sensor import (
     OaseGatewayCloudConnection,
     async_setup_entry as async_setup_binary_sensors,
 )
 from custom_components.oase_control.light import async_setup_entry as async_setup_lights
+from custom_components.oase_control.sensor import (
+    OaseGatewayFirmwareVersion,
+    OaseGatewayWifiFirmwareVersion,
+)
 from custom_components.oase_control.switch import (
     OaseDeviceSwitch,
     OaseSocketSwitch,
@@ -112,6 +119,21 @@ async def test_gateway_cloud_connection_sensor_reports_the_local_read(hass):
     assert entity.name == "Cloud connection enabled"
     assert entity.is_on is True
     assert entity.entity_category == "diagnostic"
+
+
+async def test_gateway_firmware_sensors_report_cloud_only_metadata(hass):
+    """Controller and Wi-Fi version fields come from the cloud inventory."""
+    coordinator = OaseDataUpdateCoordinator(hass, AsyncMock())
+    coordinator.data = Inventory(user=None, gateways=[_fm_master()])
+    coordinator.gateway_firmware_versions["gateway-id"] = GatewayFirmwareVersions("E52.10", "5.1")
+
+    controller = OaseGatewayFirmwareVersion(coordinator, "gateway-id")
+    wifi = OaseGatewayWifiFirmwareVersion(coordinator, "gateway-id")
+
+    assert controller.native_value == "E52.10"
+    assert controller.entity_category == "diagnostic"
+    assert wifi.native_value == "5.1"
+    assert wifi.entity_category == "diagnostic"
 
 
 def _fm_master(*devices: Device) -> Gateway:

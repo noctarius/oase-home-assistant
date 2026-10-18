@@ -19,6 +19,7 @@ from custom_components.oase_control.coordinator import (
     OaseDataUpdateCoordinator,
     _inventory_with_rdm_capabilities,
     _gateway_with_local_state,
+    gateway_firmware_versions_from_inventory,
 )
 from custom_components.oase_control.local import (
     LocalEgcDeviceState,
@@ -228,6 +229,26 @@ def test_cached_rdm_data_enables_only_confirmed_pump_controls():
     assert device.pump_state is not None
     assert device.pump_state.device_on is True
     assert device.pump_state.dimmer_value == 128
+
+
+def test_cloud_inventory_retains_gateway_firmware_metadata():
+    """Firmware fields absent from pyoase's model remain available to entities."""
+    versions = gateway_firmware_versions_from_inventory(
+        {
+            "gateways": [
+                {
+                    "id": "gateway-id",
+                    "reportedData": {
+                        "fwVersion": {"value": {"firmwareHi": 52, "firmwareLow": 10}},
+                        "wiFiModuleFwVersion": {"value": "5.1"},
+                    },
+                }
+            ]
+        }
+    )
+
+    assert versions["gateway-id"].controller == "E52.10"
+    assert versions["gateway-id"].wifi_module == "5.1"
 
 
 def test_local_egc_read_makes_the_matching_gateway_and_pump_available():

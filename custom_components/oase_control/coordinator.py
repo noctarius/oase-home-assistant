@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import logging
 from typing import Any, Awaitable, Mapping
 
@@ -30,6 +30,14 @@ _LOGGER = logging.getLogger(__name__)
 _RDM_DEVICE_ON = 0xFF
 
 
+@dataclass(frozen=True)
+class GatewayFirmwareVersions:
+    """Firmware metadata supplied by the cloud inventory."""
+
+    controller: str | None = None
+    wifi_module: str | None = None
+
+
 class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
     """Poll the OASE inventory and expose it to all entities."""
 
@@ -52,6 +60,7 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         self.local_credentials = local_credentials or {}
         self.local_sessions = OaseLocalSessionManager()
         self.local_cloud_connection_enabled: dict[str, bool] = {}
+        self.gateway_firmware_versions: dict[str, GatewayFirmwareVersions] = {}
         self._cancel_local_updates = None
         self._initial_local_update_task: asyncio.Task[None] | None = None
         self._local_read_lock = asyncio.Lock()
@@ -164,6 +173,7 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
             self._initial_local_update_task = None
         await self.local_sessions.async_close()
         self.local_cloud_connection_enabled.clear()
+        self.gateway_firmware_versions.clear()
 
     async def _async_update_data(self) -> Inventory:
         try:
@@ -171,6 +181,7 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
             if raw_inventory is not None:
                 inventory = _inventory_with_rdm_capabilities(Inventory.from_dict(raw_inventory), raw_inventory)
                 self._async_update_local_credentials(raw_inventory, inventory)
+                self._async_update_gateway_firmware_versions(raw_inventory, inventory)
             else:
                 inventory = await self.client.async_get_inventory()
         except OaseAuthError as err:
@@ -210,6 +221,17 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
                 self.config_entry,
                 data={**self.config_entry.data, CONF_LOCAL_CREDENTIALS: updated},
             )
+
+    @callback
+    def _async_update_gateway_firmware_versions(
+        self, raw_inventory: Mapping[str, Any], inventory: Inventory
+    ) -> None:
+        """Keep cloud-only firmware metadata aligned with the current inventory."""
+        versions = gateway_firmware_versions_from_inventory(raw_inventory)
+        gateway_ids = {gateway.id for gateway in inventory.gateways}
+        self.gateway_firmware_versions = {
+            gateway_id: version for gateway_id, version in versions.items() if gateway_id in gateway_ids
+        }
 
     async def _async_get_raw_inventory(self) -> dict[str, Any] | None:
         """Prefer the raw cloud response when the transport exposes it."""
@@ -342,6 +364,46 @@ def _inventory_with_rdm_capabilities(
         for gateway in inventory.gateways
     ]
     return replace(inventory, gateways=enriched_gateways)
+
+
+def gateway_firmware_versions_from_inventory(
+    raw_inventory: Mapping[str, Any],
+) -> dict[str, GatewayFirmwareVersions]:
+    """Extract gateway firmware fields retained only by the cloud response."""
+    raw_gateways = raw_inventory.get("gateways")
+    if not isinstance(raw_gateways, list):
+        return {}
+    versions: dict[str, GatewayFirmwareVersions] = {}
+    for gateway in raw_gateways:
+        if not isinstance(gateway, Mapping) or not isinstance(gateway.get("id"), str):
+            continue
+        reported_data = gateway.get("reportedData")
+        if not isinstance(reported_data, Mapping):
+            continue
+        controller = _format_controller_firmware(reported_data.get("fwVersion"))
+        wifi_module = _reported_value_as_string(reported_data.get("wiFiModuleFwVersion"))
+        if controller is not None or wifi_module is not None:
+            versions[gateway["id"]] = GatewayFirmwareVersions(controller, wifi_module)
+    return versions
+
+
+def _format_controller_firmware(record: Any) -> str | None:
+    """Format the numeric controller version carried by the cloud inventory."""
+    value = record.get("value") if isinstance(record, Mapping) else None
+    if not isinstance(value, Mapping):
+        return None
+    high, low = value.get("firmwareHi"), value.get("firmwareLow")
+    if not isinstance(high, int) or not isinstance(low, int):
+        return None
+    return f"E{high}.{low}"
+
+
+def _reported_value_as_string(record: Any) -> str | None:
+    """Return a non-empty scalar reported value without coercing structures."""
+    value = record.get("value") if isinstance(record, Mapping) else None
+    if isinstance(value, (str, int, float)) and str(value):
+        return str(value)
+    return None
 
 
 def _gateway_with_rdm_capabilities(gateway: Gateway, raw_gateway: Any) -> Gateway:
