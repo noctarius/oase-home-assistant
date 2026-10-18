@@ -11,7 +11,10 @@ from pyoase import Device, Gateway, Inventory, OaseConnectionError, onet
 
 from custom_components.oase_control.coordinator import OaseDataUpdateCoordinator
 
-from custom_components.oase_control.binary_sensor import async_setup_entry as async_setup_binary_sensors
+from custom_components.oase_control.binary_sensor import (
+    OaseGatewayCloudConnection,
+    async_setup_entry as async_setup_binary_sensors,
+)
 from custom_components.oase_control.light import async_setup_entry as async_setup_lights
 from custom_components.oase_control.switch import (
     OaseDeviceSwitch,
@@ -96,6 +99,19 @@ async def test_egc_device_is_registered_beneath_its_gateway(hass):
         connected.unique_id,
         entity_category=connected.entity_category,
     )
+
+
+async def test_gateway_cloud_connection_sensor_reports_the_local_read(hass):
+    """The cloud setting is a read-only diagnostic, not a cloud availability signal."""
+    coordinator = OaseDataUpdateCoordinator(hass, AsyncMock())
+    coordinator.data = Inventory(user=None, gateways=[_fm_master()])
+    coordinator.local_cloud_connection_enabled["gateway-id"] = True
+
+    entity = OaseGatewayCloudConnection(coordinator, "gateway-id")
+
+    assert entity.name == "Cloud connection enabled"
+    assert entity.is_on is True
+    assert entity.entity_category == "diagnostic"
 
 
 def _fm_master(*devices: Device) -> Gateway:

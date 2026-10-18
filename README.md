@@ -11,6 +11,7 @@ O-Net frame handling.
 - OASE Cloud account sign-in (Azure AD B2C via `pyoase`)
 - 30-second cloud inventory polling and 5-second local status polling
 - Gateway availability and type
+- Read-only local cloud-connection-enabled diagnostic
 - FM-Master sockets 1–3 as switches
 - Dimmable outlet as a brightness light
 - Attached EGC devices' own on/off state

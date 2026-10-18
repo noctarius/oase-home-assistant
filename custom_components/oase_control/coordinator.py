@@ -51,6 +51,7 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
         self.client = client
         self.local_credentials = local_credentials or {}
         self.local_sessions = OaseLocalSessionManager()
+        self.local_cloud_connection_enabled: dict[str, bool] = {}
         self._cancel_local_updates = None
         self._initial_local_update_task: asyncio.Task[None] | None = None
         self._local_read_lock = asyncio.Lock()
@@ -89,6 +90,12 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
                 self._local_refresh_pending = False
                 states = await self._async_read_local_states(self.data)
                 if states and self.data is not None:
+                    self.local_cloud_connection_enabled = {
+                        gateway_id: state.cloud_connection_enabled
+                        for gateway_id, state in states.items()
+                        if isinstance(state, LocalGatewayState)
+                        and state.cloud_connection_enabled is not None
+                    }
                     # Overlay onto the current inventory rather than the one the
                     # read started from: a cloud refresh may have completed in
                     # the meantime.  async_set_updated_data is deliberately not
@@ -156,6 +163,7 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
             await asyncio.gather(self._initial_local_update_task, return_exceptions=True)
             self._initial_local_update_task = None
         await self.local_sessions.async_close()
+        self.local_cloud_connection_enabled.clear()
 
     async def _async_update_data(self) -> Inventory:
         try:
@@ -242,6 +250,12 @@ class OaseDataUpdateCoordinator(DataUpdateCoordinator[Inventory]):
     ) -> dict[str, LocalGatewayState]:
         """Read every reachable gateway's local state, keyed by gateway id."""
         await self.local_sessions.async_prune({gateway.id for gateway in inventory.gateways})
+        valid_gateway_ids = {gateway.id for gateway in inventory.gateways}
+        self.local_cloud_connection_enabled = {
+            gateway_id: enabled
+            for gateway_id, enabled in self.local_cloud_connection_enabled.items()
+            if gateway_id in valid_gateway_ids
+        }
         if not self.local_credentials:
             return {}
         # A periodic status refresh can overlap a cloud inventory refresh.  The

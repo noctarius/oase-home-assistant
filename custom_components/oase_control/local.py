@@ -41,6 +41,12 @@ _SESSION_ERRORS: Final = (ConnectionError, OSError, TimeoutError, ValueError)
 # Reconnect delays after failed connects; a rejected credential waits longest.
 _RECONNECT_BACKOFF_MIN: Final = 5.0
 _RECONNECT_BACKOFF_MAX: Final = 300.0
+# Hardware-verified local cloud-state request/reply pair.  The first response
+# byte is 0/1 for cloud connection disabled/enabled; the remaining bytes are
+# retained by the controller protocol but are not exposed until understood.
+_GET_CLOUD_STATE: Final = 0xA400
+_GET_CLOUD_STATE_REPLY: Final = 0xA4FF
+_CLOUD_STATE_LENGTH: Final = 5
 
 _T = TypeVar("_T")
 
@@ -78,11 +84,20 @@ class LocalEgcDeviceState:
 
 
 @dataclass(frozen=True)
+class LocalCloudState:
+    """Validated local cloud state; only ``connection_enabled`` is decoded."""
+
+    connection_enabled: bool
+    raw: bytes
+
+
+@dataclass(frozen=True)
 class LocalGatewayState:
     """State available from one authenticated local controller session."""
 
     egc_devices: tuple[LocalEgcDeviceState, ...]
     sockets: onet.SocketState | None = None
+    cloud_connection_enabled: bool | None = None
 
 
 @dataclass
@@ -554,7 +569,32 @@ async def async_read_gateway_state(
     """Read all generic EGC state and an FM-Master's socket scene when requested."""
     egc_devices = await async_read_egc_devices(session, timeout=timeout)
     sockets = await async_read_socket_state(session, timeout=timeout) if read_sockets else None
-    return LocalGatewayState(egc_devices, sockets)
+    cloud_connection_enabled = await async_read_cloud_connection_enabled(session, timeout=timeout)
+    return LocalGatewayState(egc_devices, sockets, cloud_connection_enabled)
+
+
+async def async_read_cloud_connection_enabled(
+    session: OaseLocalTlsSession, *, timeout: float = 5.0
+) -> bool:
+    """Read the controller's locally configured cloud-connection setting.
+
+    This is deliberately read-only. Enabling cloud access requires a separate
+    cloud registration/key lifecycle, so it is not represented as a writable
+    Home Assistant control.
+    """
+    return (await async_read_cloud_state(session, timeout=timeout)).connection_enabled
+
+
+async def async_read_cloud_state(
+    session: OaseLocalTlsSession, *, timeout: float = 5.0
+) -> LocalCloudState:
+    """Read and strictly validate the complete local cloud-state record."""
+    reply = await session.async_request(_GET_CLOUD_STATE, timeout=timeout)
+    if reply.packet_type != _GET_CLOUD_STATE_REPLY:
+        raise OaseLocalTransportError("controller returned an unexpected cloud-state reply")
+    if len(reply.payload) != _CLOUD_STATE_LENGTH or reply.payload[0] not in (0, 1):
+        raise OaseLocalTransportError("controller returned an invalid cloud-state reply")
+    return LocalCloudState(connection_enabled=bool(reply.payload[0]), raw=reply.payload)
 
 
 async def async_read_socket_state(

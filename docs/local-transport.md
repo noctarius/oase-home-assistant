@@ -39,6 +39,9 @@ read-only O-Net request/reply validation.
 
 ## Supported local operations
 
+- Read-only cloud-connection-enabled status as a gateway diagnostic binary
+  sensor. It is not a writable control: enabling cloud access requires a cloud
+  registration/key lifecycle, and disabling it alone could prevent recovery.
 - EGC discovery and supported RDM reads/writes (device on/off and pump power)
 - FM-Master live socket-scene reads (`GET_LIVE_SCENE`)
 - FM-Master socket and dimmer writes (`SET_LIVE_SCENE`), with a matching,

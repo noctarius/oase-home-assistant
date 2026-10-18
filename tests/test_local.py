@@ -24,6 +24,8 @@ from custom_components.oase_control.local import (
     _local_network,
     _parse_discovery_result,
     async_discover_controllers,
+    async_read_cloud_state,
+    async_read_cloud_connection_enabled,
     async_read_socket_state,
     async_open_tls_session,
     async_read_egc_devices,
@@ -173,6 +175,42 @@ async def test_local_socket_scene_read_requires_the_fm_master_reply_shape():
     session.async_request.assert_awaited_once_with(
         onet.PacketType.GET_LIVE_SCENE, onet.build_socket_get_payload(), timeout=5.0
     )
+
+
+@pytest.mark.parametrize(("payload", "expected"), [(b"\x00\x02\x00\x00\x00", False), (b"\x01\x01\x00\x01\x00", True)])
+async def test_local_cloud_connection_read_requires_the_verified_reply_shape(payload, expected):
+    """Cloud connection is derived only from a matching five-byte reply."""
+    session = OaseLocalTlsSession(AsyncMock(), AsyncMock(), AsyncMock())
+    session.async_request = AsyncMock(return_value=onet.OnetPacket(0xA4FF, payload))
+
+    assert await async_read_cloud_connection_enabled(session) is expected
+    session.async_request.assert_awaited_once_with(0xA400, timeout=5.0)
+
+
+async def test_local_cloud_state_retains_the_validated_private_record():
+    """Only the enabled byte is exposed, while diagnostics can retain the record."""
+    session = OaseLocalTlsSession(AsyncMock(), AsyncMock(), AsyncMock())
+    session.async_request = AsyncMock(
+        return_value=onet.OnetPacket(0xA4FF, b"\x01\x01\x00\x01\x00")
+    )
+
+    state = await async_read_cloud_state(session)
+
+    assert state.connection_enabled is True
+    assert state.raw == b"\x01\x01\x00\x01\x00"
+
+
+@pytest.mark.parametrize(
+    ("packet_type", "payload"),
+    [(onet.PacketType.ALIVE, b"\x01\x01\x00\x01\x00"), (0xA4FF, b"\x02\x01\x00\x01\x00"), (0xA4FF, b"\x01")],
+)
+async def test_local_cloud_connection_read_rejects_malformed_replies(packet_type, payload):
+    """Unexpected cloud-state frames must not become an entity state."""
+    session = OaseLocalTlsSession(AsyncMock(), AsyncMock(), AsyncMock())
+    session.async_request = AsyncMock(return_value=onet.OnetPacket(packet_type, payload))
+
+    with pytest.raises(OaseLocalTransportError):
+        await async_read_cloud_connection_enabled(session)
 
 
 @pytest.mark.parametrize(

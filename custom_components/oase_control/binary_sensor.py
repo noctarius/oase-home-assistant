@@ -20,6 +20,7 @@ async def async_setup_entry(
     entities: list[BinarySensorEntity] = []
     for gateway in entry.runtime_data.data.gateways:
         entities.append(OaseGatewayOnline(entry.runtime_data, gateway.id))
+        entities.append(OaseGatewayCloudConnection(entry.runtime_data, gateway.id))
         entities.extend(
             OaseDeviceConnected(entry.runtime_data, gateway.id, device)
             for device in gateway.devices
@@ -41,6 +42,22 @@ class OaseGatewayOnline(OaseEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool | None:
         return self.gateway.is_online if self.gateway else None
+
+
+class OaseGatewayCloudConnection(OaseEntity, BinarySensorEntity):
+    """Whether the controller has its cloud connection enabled locally."""
+
+    _attr_name = "Cloud connection enabled"
+    _attr_icon = "mdi:cloud"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, gateway_id: str) -> None:
+        super().__init__(coordinator, gateway_id)
+        self._attr_unique_id = f"{gateway_id}_cloud_connection_enabled"
+
+    @property
+    def is_on(self) -> bool | None:
+        return self.coordinator.local_cloud_connection_enabled.get(self.gateway_id)
 
 
 class OaseDeviceConnected(OaseDeviceEntity, BinarySensorEntity):
